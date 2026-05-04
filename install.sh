@@ -7,7 +7,7 @@ echo "=== album2 install ==="
 # ── System packages ────────────────────────────────────────────────────────────
 sudo apt-get update -q
 sudo apt-get install -y \
-    python3-pip python3-venv \
+    python3-pip python3-venv python3-pygame \
     libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
     libjpeg-dev zlib1g-dev libfreetype6-dev \
     python3-smbus i2c-tools \

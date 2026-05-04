@@ -1,4 +1,3 @@
-pygame>=2.0
 python-mpd2>=3.0
 Pillow>=8.0
 requests>=2.25
