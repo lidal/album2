@@ -64,7 +64,7 @@ def main():
     if _BARE_METAL:
         from framebuffer import Framebuffer, EvdevTouch
         try:
-            fb = Framebuffer("/dev/fb0")
+            fb = Framebuffer("/dev/fb0", target_w=SCREEN_WIDTH, target_h=SCREEN_HEIGHT)
         except Exception as exc:
             log.error("Cannot open /dev/fb0: %s — display will be blank", exc)
         try:

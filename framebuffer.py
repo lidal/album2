@@ -14,6 +14,7 @@ import pygame
 log = logging.getLogger(__name__)
 
 FBIOGET_VSCREENINFO = 0x4600
+FBIOPUT_VSCREENINFO = 0x4601
 
 # input_event on 64-bit Linux: two int64 (timeval) + uint16 type + uint16 code + int32 value
 _EV_FMT = "qqHHi"
@@ -34,13 +35,30 @@ def _eviocgabs(axis: int) -> int:
 class Framebuffer:
     """Blits a pygame surface directly to /dev/fb0 each frame."""
 
-    def __init__(self, device: str = "/dev/fb0") -> None:
+    def __init__(self, device: str = "/dev/fb0",
+                 target_w: int = 0, target_h: int = 0) -> None:
         self._f = open(device, "rb+")
-        vinfo   = fcntl.ioctl(self._f, FBIOGET_VSCREENINFO, bytes(160))
-        xres, yres          = struct.unpack_from("II", vinfo, 0)
-        bpp                 = struct.unpack_from("I",  vinfo, 24)[0]
-        r_off               = struct.unpack_from("I",  vinfo, 32)[0]
-        b_off               = struct.unpack_from("I",  vinfo, 56)[0]
+        vinfo   = bytearray(fcntl.ioctl(self._f, FBIOGET_VSCREENINFO, bytes(160)))
+        xres, yres = struct.unpack_from("II", vinfo, 0)
+        bpp        = struct.unpack_from("I",  vinfo, 24)[0]
+
+        tw = target_w or xres
+        th = target_h or yres
+        if xres != tw or yres != th or bpp != 32:
+            try:
+                struct.pack_into("II", vinfo,  0, tw, th)   # xres, yres
+                struct.pack_into("II", vinfo,  8, tw, th)   # xres_virtual, yres_virtual
+                struct.pack_into("I",  vinfo, 24, 32)        # bits_per_pixel
+                fcntl.ioctl(self._f, FBIOPUT_VSCREENINFO, bytes(vinfo))
+                vinfo = bytearray(fcntl.ioctl(self._f, FBIOGET_VSCREENINFO, bytes(160)))
+                xres, yres = struct.unpack_from("II", vinfo, 0)
+                bpp        = struct.unpack_from("I",  vinfo, 24)[0]
+                log.info("Framebuffer reconfigured to %dx%d %dbpp", xres, yres, bpp)
+            except Exception as exc:
+                log.warning("Could not reconfigure framebuffer: %s", exc)
+
+        r_off               = struct.unpack_from("I", vinfo, 32)[0]
+        b_off               = struct.unpack_from("I", vinfo, 56)[0]
         self.width          = xres
         self.height         = yres
         self.bpp            = bpp
