@@ -92,7 +92,9 @@ ExecStart=$VENV_PYTHON $SCRIPT_DIR/main.py
 Restart=on-failure
 RestartSec=5
 TTYPath=/dev/tty1
-StandardInput=tty
+StandardInput=tty-force
+TTYVHangup=yes
+TTYReset=yes
 StandardOutput=journal
 StandardError=journal
 
