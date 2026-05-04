@@ -48,6 +48,13 @@ class Framebuffer:
         log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
 
     def flip(self, surface: pygame.Surface) -> None:
+        if surface.get_width() != self.width or surface.get_height() != self.height:
+            surface = pygame.transform.scale(surface, (self.width, self.height))
+        if self.bpp != 32:
+            raise RuntimeError(
+                "Framebuffer is {}bpp — add 'framebuffer_depth=32' to "
+                "/boot/config.txt and reboot.".format(self.bpp)
+            )
         data = pygame.image.tostring(surface, self._fmt)
         self._map.seek(0)
         self._map.write(data)
