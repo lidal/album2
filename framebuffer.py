@@ -51,14 +51,23 @@ class Framebuffer:
     def flip(self, surface: pygame.Surface) -> None:
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
-        if self.bpp != 32:
-            raise RuntimeError(
-                "Framebuffer is {}bpp — add 'framebuffer_depth=32' to "
-                "/boot/config.txt and reboot.".format(self.bpp)
-            )
-        data = pygame.image.tostring(surface, self._fmt)
+        if self.bpp == 32:
+            data = pygame.image.tostring(surface, self._fmt)
+        elif self.bpp == 16:
+            data = self._to_rgb565(surface)
+        else:
+            raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
         self._map.seek(0)
         self._map.write(data)
+
+    def _to_rgb565(self, surface: pygame.Surface) -> bytes:
+        import numpy as np
+        arr = pygame.surfarray.pixels3d(surface)   # (W, H, 3) col-major RGB
+        r   = arr[:, :, 0].astype(np.uint16)
+        g   = arr[:, :, 1].astype(np.uint16)
+        b   = arr[:, :, 2].astype(np.uint16)
+        rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        return rgb565.T.astype("<u2").tobytes()    # row-major little-endian
 
     def close(self) -> None:
         self._map.close()
