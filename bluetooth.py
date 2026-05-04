@@ -1,3 +1,4 @@
+from __future__ import annotations
 import re
 import subprocess
 import threading
@@ -35,8 +36,12 @@ class BluetoothManager:
     def _addr_set(self, *filter_args) -> set[str]:
         try:
             out = _run("devices", *filter_args)
-            return {p[1] for line in out.splitlines()
-                    if len(p := line.strip().split()) >= 2 and p[0] == "Device"}
+            result = set()
+            for line in out.splitlines():
+                p = line.strip().split()
+                if len(p) >= 2 and p[0] == "Device":
+                    result.add(p[1])
+            return result
         except Exception:
             return set()
 

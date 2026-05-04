@@ -35,6 +35,7 @@ Touch gestures (GRID / peek)
   vertical drag              → scroll grid
 """
 
+from __future__ import annotations
 import bisect
 import concurrent.futures
 import hashlib

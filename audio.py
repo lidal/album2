@@ -2,6 +2,7 @@
 Audio output sink enumeration and switching.
 Supports wpctl (PipeWire) and pactl (PulseAudio).
 """
+from __future__ import annotations
 import re
 import subprocess
 import logging

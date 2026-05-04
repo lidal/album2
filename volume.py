@@ -16,6 +16,7 @@ the hardware I2C bus.  Pimoroni's newer drivers expose a software-I2C bus on
 a different bus number (often bus 11).  Check with `i2cdetect -l` and set
 VOLUME_I2C_BUS in config.py accordingly.
 """
+from __future__ import annotations
 import threading
 import time
 import logging

@@ -8,6 +8,7 @@ Two separate MPD connections:
 Album art / images come from the Mopidy HTTP JSON-RPC API because it handles
 all back-ends (local files, Spotify, etc.) transparently.
 """
+from __future__ import annotations
 import threading
 import time
 import io
