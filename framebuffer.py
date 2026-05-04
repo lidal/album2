@@ -126,9 +126,9 @@ class EvdevTouch:
                 _, _, etype, code, value = struct.unpack(_EV_FMT, data)
                 if etype == EV_ABS:
                     if code == ABS_X:
-                        self._x = int(value * self._sw / self._max_x)
+                        self._x = self._sw - 1 - int(value * self._sw / self._max_x)
                     elif code == ABS_Y:
-                        self._y = int(value * self._sh / self._max_y)
+                        self._y = self._sh - 1 - int(value * self._sh / self._max_y)
                 elif etype == EV_KEY and code == BTN_TOUCH:
                     pos = (self._x, self._y)
                     if value:
