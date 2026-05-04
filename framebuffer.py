@@ -110,8 +110,8 @@ class EvdevTouch:
             _, max_x        = struct.unpack_from("ii", info_x, 0)
             info_y          = fcntl.ioctl(f, _eviocgabs(ABS_Y), bytes(24))
             _, max_y        = struct.unpack_from("ii", info_y, 0)
-            self._max_x     = max_x if max_x > 0 else 4095
-            self._max_y     = max_y if max_y > 0 else 4095
+            self._max_x     = max_x if max_x > 0 else 719
+            self._max_y     = max_y if max_y > 0 else 719
             log.info("EvdevTouch %s: range %dx%d", device, self._max_x, self._max_y)
             threading.Thread(target=self._run, args=(f,), daemon=True).start()
         except Exception as exc:
