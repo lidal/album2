@@ -91,6 +91,10 @@ Environment=SDL_MOUSEDEV=/dev/input/touchscreen
 ExecStart=$VENV_PYTHON $SCRIPT_DIR/main.py
 Restart=on-failure
 RestartSec=5
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
