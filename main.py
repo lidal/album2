@@ -25,17 +25,34 @@ log = logging.getLogger("album2")
 
 
 def _init_display() -> pygame.Surface:
-    if not os.environ.get("DISPLAY"):
-        # Bare framebuffer (Pi without X/Wayland)
-        os.environ.setdefault("SDL_VIDEODRIVER", "fbcon")
-        os.environ.setdefault("SDL_FBDEV", "/dev/fb0")
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        # Bare framebuffer — let SDL_VIDEODRIVER be overridden from env/service,
+        # otherwise probe kmsdrm (modern Pi OS) then fbcon (legacy).
+        os.environ.setdefault("SDL_FBDEV",    "/dev/fb0")
         os.environ.setdefault("SDL_MOUSEDRV", "TSLIB")
         os.environ.setdefault("SDL_MOUSEDEV", "/dev/input/touchscreen")
-    elif os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("SDL_VIDEODRIVER"):
-        # Prefer native Wayland over XWayland — gives pixel-accurate scroll
-        os.environ["SDL_VIDEODRIVER"] = "wayland"
 
-    pygame.display.init()
+        if not os.environ.get("SDL_VIDEODRIVER"):
+            for driver in ("kmsdrm", "fbcon"):
+                os.environ["SDL_VIDEODRIVER"] = driver
+                try:
+                    pygame.display.init()
+                    log.info("SDL video driver: %s", driver)
+                    break
+                except pygame.error:
+                    pygame.display.quit()
+            else:
+                raise RuntimeError(
+                    "No working SDL video driver found (tried kmsdrm, fbcon). "
+                    "Check that your user is in the 'video' group: "
+                    "sudo usermod -aG video $USER"
+                )
+    else:
+        if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("SDL_VIDEODRIVER"):
+            # Prefer native Wayland over XWayland — gives pixel-accurate scroll
+            os.environ["SDL_VIDEODRIVER"] = "wayland"
+        pygame.display.init()
+
     pygame.font.init()
 
     flags = pygame.NOFRAME

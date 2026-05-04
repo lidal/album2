@@ -65,13 +65,16 @@ SUDOERS
 sudo chmod 0440 "$SUDOERS_FILE"
 echo "Sudoers rule written to $SUDOERS_FILE"
 
+# ── Group membership (framebuffer + input device access) ──────────────────────
+sudo usermod -aG video,input "$USERNAME"
+echo "Added $USERNAME to video and input groups (re-login required)"
+
 # ── Enable Mopidy service ─────────────────────────────────────────────────────
 sudo systemctl enable mopidy
 
 # ── Autostart via systemd (framebuffer, no desktop) ───────────────────────────
 UNIT_FILE="/etc/systemd/system/album2.service"
 VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
-USERNAME="$(whoami)"
 
 sudo tee "$UNIT_FILE" > /dev/null << UNIT
 [Unit]
@@ -82,7 +85,6 @@ Wants=mopidy.service
 [Service]
 User=$USERNAME
 WorkingDirectory=$SCRIPT_DIR
-Environment=SDL_VIDEODRIVER=fbcon
 Environment=SDL_FBDEV=/dev/fb0
 Environment=SDL_MOUSEDRV=TSLIB
 Environment=SDL_MOUSEDEV=/dev/input/touchscreen
