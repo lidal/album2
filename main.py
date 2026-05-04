@@ -23,46 +23,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("album2")
 
+_BARE_METAL = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+
 
 def _init_display() -> pygame.Surface:
-    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        # Bare framebuffer — let SDL_VIDEODRIVER be overridden from env/service,
-        # otherwise probe kmsdrm (modern Pi OS) then fbcon (legacy).
-        os.environ.setdefault("SDL_FBDEV",    "/dev/fb0")
-        os.environ.setdefault("SDL_MOUSEDRV", "TSLIB")
-        os.environ.setdefault("SDL_MOUSEDEV", "/dev/input/touchscreen")
-
-        if not os.environ.get("SDL_VIDEODRIVER"):
-            import glob
-            fb_devs  = glob.glob("/dev/fb*")
-            dri_devs = glob.glob("/dev/dri/card*")
-            log.info("framebuffer devices: %s", fb_devs or "none")
-            log.info("DRI/KMS devices:     %s", dri_devs or "none")
-
-            errors = {}
-            for driver in ("kmsdrm", "fbcon", "offscreen"):
-                os.environ["SDL_VIDEODRIVER"] = driver
-                try:
-                    pygame.display.init()
-                    log.info("SDL video driver: %s", driver)
-                    break
-                except pygame.error as exc:
-                    errors[driver] = str(exc)
-                    log.warning("SDL driver %s failed: %s", driver, exc)
-                    pygame.display.quit()
-            else:
-                raise RuntimeError(
-                    "No working SDL video driver found.\n"
-                    "Driver errors: {}\n"
-                    "Framebuffer devices: {}\n"
-                    "DRI devices: {}\n"
-                    "Check: sudo usermod -aG video,input $USER  (then re-login)".format(
-                        errors, fb_devs, dri_devs
-                    )
-                )
+    if _BARE_METAL:
+        # No X11/Wayland — render offscreen and blit to /dev/fb0 ourselves.
+        # Neither the bundled pip SDL2 nor the system SDL2 on Pi OS Buster
+        # has fbcon/kmsdrm compiled in, so this is the only reliable path.
+        os.environ["SDL_VIDEODRIVER"] = "offscreen"
+        pygame.display.init()
+        log.info("SDL video driver: offscreen (frames pushed to /dev/fb0)")
     else:
         if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("SDL_VIDEODRIVER"):
-            # Prefer native Wayland over XWayland — gives pixel-accurate scroll
             os.environ["SDL_VIDEODRIVER"] = "wayland"
         pygame.display.init()
 
@@ -85,6 +58,20 @@ def _init_display() -> pygame.Surface:
 def main():
     log.info("Starting album2")
     screen  = _init_display()
+
+    fb    = None
+    touch = None
+    if _BARE_METAL:
+        from framebuffer import Framebuffer, EvdevTouch
+        try:
+            fb = Framebuffer("/dev/fb0")
+        except Exception as exc:
+            log.error("Cannot open /dev/fb0: %s — display will be blank", exc)
+        try:
+            touch = EvdevTouch("/dev/input/event0", SCREEN_WIDTH, SCREEN_HEIGHT)
+        except Exception as exc:
+            log.warning("Cannot open touch device: %s", exc)
+
     player  = MopidyPlayer()
     volume  = VolumeSimulator() if VOLUME_SIMULATE else VolumeController()
     bt      = BluetoothManager()
@@ -107,11 +94,16 @@ def main():
         display.update()
         fps = display.target_fps()
         display.draw()
-        pygame.display.flip()
+        if fb:
+            fb.flip(screen)
+        else:
+            pygame.display.flip()
         clock.tick(fps)
 
     log.info("Shutting down")
     player.disconnect()
+    if fb:
+        fb.close()
     pygame.quit()
     sys.exit(0)
 

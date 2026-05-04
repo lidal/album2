@@ -85,9 +85,6 @@ Wants=mopidy.service
 [Service]
 User=$USERNAME
 WorkingDirectory=$SCRIPT_DIR
-SupplementaryGroups=tty
-Environment=SDL_FBDEV=/dev/fb0
-Environment=SDL_MOUSEDEV=/dev/input/event0
 ExecStart=$VENV_PYTHON $SCRIPT_DIR/main.py
 Restart=on-failure
 RestartSec=5
