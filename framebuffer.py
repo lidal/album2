@@ -43,6 +43,7 @@ class Framebuffer:
         b_off               = struct.unpack_from("I",  vinfo, 56)[0]
         self.width          = xres
         self.height         = yres
+        self.bpp            = bpp
         self._fmt           = "BGRA" if r_off > b_off else "RGBA"
         self._map           = mmap.mmap(self._f.fileno(), xres * yres * (bpp // 8))
         log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
