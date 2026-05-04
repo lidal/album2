@@ -33,19 +33,32 @@ def _init_display() -> pygame.Surface:
         os.environ.setdefault("SDL_MOUSEDEV", "/dev/input/touchscreen")
 
         if not os.environ.get("SDL_VIDEODRIVER"):
-            for driver in ("kmsdrm", "fbcon"):
+            import glob
+            fb_devs  = glob.glob("/dev/fb*")
+            dri_devs = glob.glob("/dev/dri/card*")
+            log.info("framebuffer devices: %s", fb_devs or "none")
+            log.info("DRI/KMS devices:     %s", dri_devs or "none")
+
+            errors = {}
+            for driver in ("kmsdrm", "fbcon", "offscreen"):
                 os.environ["SDL_VIDEODRIVER"] = driver
                 try:
                     pygame.display.init()
                     log.info("SDL video driver: %s", driver)
                     break
-                except pygame.error:
+                except pygame.error as exc:
+                    errors[driver] = str(exc)
+                    log.warning("SDL driver %s failed: %s", driver, exc)
                     pygame.display.quit()
             else:
                 raise RuntimeError(
-                    "No working SDL video driver found (tried kmsdrm, fbcon). "
-                    "Check that your user is in the 'video' group: "
-                    "sudo usermod -aG video $USER"
+                    "No working SDL video driver found.\n"
+                    "Driver errors: {}\n"
+                    "Framebuffer devices: {}\n"
+                    "DRI devices: {}\n"
+                    "Check: sudo usermod -aG video,input $USER  (then re-login)".format(
+                        errors, fb_devs, dri_devs
+                    )
                 )
     else:
         if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("SDL_VIDEODRIVER"):
