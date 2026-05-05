@@ -480,11 +480,19 @@ class App:
                     full.save(full_jpg, "JPEG", quality=90)
                 else:
                     full = None
-            # Derive thumbnail from the full-size image.
+            # Derive thumbnail and populate the full-size memory cache.
             if full:
+                if full.size != (W, H):
+                    full_wh = full.resize((W, H), Image.LANCZOS)
+                else:
+                    full_wh = full
+                self._art_mem[uri] = _pil_to_surf(full_wh)
+                if len(self._art_mem) > self._ART_MEM_MAX:
+                    self._art_mem.popitem(last=False)
                 thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
                 album["thumb"] = _pil_to_surf(thumb)
             else:
+                self._art_mem[uri] = None
                 album["thumb"] = None
         except Exception as e:
             log.debug("Thumb %d: %s", idx, e)
