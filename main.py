@@ -105,11 +105,11 @@ def main():
 
         display.update()
         fps = display.target_fps()
-        display.draw()
-        if fb:
-            fb.flip(screen)
-        else:
-            pygame.display.flip()
+        if display.draw():
+            if fb:
+                fb.flip(screen)
+            else:
+                pygame.display.flip()
         clock.tick(fps)
 
     log.info("Shutting down")

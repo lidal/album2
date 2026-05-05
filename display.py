@@ -411,6 +411,7 @@ class App:
         # elapsed interpolation: base value + wall-clock time since that poll
         self._elapsed_base   = 0.0
         self._elapsed_base_t = 0.0
+        self._last_progress_px = -1   # last drawn progress bar pixel; avoids spurious dirty
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -556,7 +557,7 @@ class App:
                 or self._art_fade < 1.0
                 or self._flash_alpha > 0
                 or self._pending_tap
-                or self._status.get("state") == "play"
+                or self._progress_px_changed()
                 or now_ms < self._vol_until_ms
                 or self._bt_refreshing
                 or self._wifi_refreshing
@@ -684,7 +685,7 @@ class App:
                 or self._art_fade < 1.0
                 or self._flash_alpha > 0
                 or self._pending_tap
-                or self._status.get("state") == "play"
+                or self._progress_px_changed()
                 or now_ms < self._vol_until_ms
                 or self._bt_refreshing
                 or self._wifi_refreshing
@@ -700,6 +701,25 @@ class App:
 
     # ── draw ──────────────────────────────────────────────────────────────────
 
+    def _progress_px_changed(self) -> bool:
+        """True only when the progress bar pixel position has moved since last check."""
+        if self._status.get("state") != "play":
+            self._last_progress_px = -1
+            return False
+        time_str = self._status.get("time", "")
+        parts = time_str.split(":") if time_str else []
+        if len(parts) < 2:
+            return True
+        dur = float(parts[1])
+        if dur <= 0:
+            return True
+        el  = self._elapsed_base + (time.monotonic() - self._elapsed_base_t)
+        px  = int(W * min(1.0, el / dur))
+        if px != self._last_progress_px:
+            self._last_progress_px = px
+            return True
+        return False
+
     def target_fps(self) -> int:
         if not settings.get("idle_fps"):
             return FPS
@@ -707,10 +727,10 @@ class App:
             return FPS
         return FPS if self._dirty else 10
 
-    def draw(self):
+    def draw(self) -> bool:
         kb_active = self._kb_ssid is not None
         if not self._dirty and settings.get("skip_draw") and not settings.get("debug") and not kb_active:
-            return
+            return False
         self._dirty = False
         if self._view == View.SETTINGS:
             self._draw_settings()
@@ -723,16 +743,16 @@ class App:
                 self._draw_debug_overlays()
             if kb_active:
                 self._draw_keyboard()
-            return
+            return True
         if self._view == View.CALIBRATE:
             self._draw_calibrate()
-            return
+            return True
         if self._view == View.SCAN:
             self._draw_scan()
             self._draw_volume_badge()
             if settings.get("debug"):
                 self._draw_debug_overlays()
-            return
+            return True
 
         ay = self._album_y
 
@@ -764,6 +784,7 @@ class App:
         self._draw_volume_badge()
         if settings.get("debug"):
             self._draw_debug_overlays()
+        return True
 
     # ── draw: grid ────────────────────────────────────────────────────────────
 
