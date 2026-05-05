@@ -462,14 +462,14 @@ class App:
         album    = self._albums[idx]
         uri      = album["track_uri"]
         key      = hashlib.md5(uri.encode()).hexdigest()
-        full_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
-        full_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
+        full_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
+        full_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")  # legacy
         try:
             # Full-size is the primary source of truth; always produce it first.
-            if os.path.exists(full_jpg):
-                full = Image.open(full_jpg).convert("RGB")
-            elif os.path.exists(full_png):
+            if os.path.exists(full_png):
                 full = Image.open(full_png).convert("RGB")
+            elif os.path.exists(full_jpg):
+                full = Image.open(full_jpg).convert("RGB")
             else:
                 raw = self.player.get_album_art(uri)
                 if raw:
@@ -478,7 +478,7 @@ class App:
                     full = raw.crop(((w - side) // 2, (h - side) // 2,
                                      (w + side) // 2, (h + side) // 2))
                     full = full.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
-                    full.save(full_jpg, "JPEG", quality=90)
+                    full.save(full_png, "PNG")
                 else:
                     full = None
             # Derive thumbnail and populate the full-size memory cache.
@@ -521,13 +521,13 @@ class App:
 
         def _bg():
             key      = hashlib.md5(uri.encode()).hexdigest()
-            path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
-            path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
+            path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
+            path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")  # legacy
             try:
-                if os.path.exists(path_jpg):
-                    img = Image.open(path_jpg).convert("RGB")
-                elif os.path.exists(path_png):
+                if os.path.exists(path_png):
                     img = Image.open(path_png).convert("RGB")
+                elif os.path.exists(path_jpg):
+                    img = Image.open(path_jpg).convert("RGB")
                 else:
                     img = self.player.get_album_art(uri)
                     if img:
@@ -536,7 +536,7 @@ class App:
                         img    = img.crop(((dw - side) // 2, (dh - side) // 2,
                                            (dw + side) // 2, (dh + side) // 2))
                         img    = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
-                        img.save(path_jpg, "JPEG", quality=90)
+                        img.save(path_png, "PNG")
                 if img:
                     if img.size != (W, H):
                         img = img.resize((W, H), Image.LANCZOS)
