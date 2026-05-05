@@ -5,6 +5,7 @@ Used on Raspberry Pi when no SDL video driver supports /dev/fb0 natively.
 from __future__ import annotations
 import fcntl
 import mmap
+import queue
 import struct
 import threading
 import logging
@@ -68,6 +69,19 @@ class Framebuffer:
         self._map           = mmap.mmap(self._f.fileno(), xres * yres * (bpp // 8))
         log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
 
+        # Worker thread owns the mmap write; GIL is released during I/O so this
+        # runs on a second core while the main thread renders the next frame.
+        self._q: queue.Queue[bytes | None] = queue.Queue(maxsize=1)
+        threading.Thread(target=self._writer, daemon=True).start()
+
+    def _writer(self) -> None:
+        while True:
+            data = self._q.get()
+            if data is None:
+                return
+            self._map.seek(0)
+            self._map.write(data)
+
     def flip(self, surface: pygame.Surface) -> None:
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
@@ -77,8 +91,12 @@ class Framebuffer:
             data = self._to_rgb565(surface)
         else:
             raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
-        self._map.seek(0)
-        self._map.write(data)
+        # Drop the oldest pending frame if the writer is still busy (maxsize=1).
+        try:
+            self._q.get_nowait()
+        except queue.Empty:
+            pass
+        self._q.put(data)
 
     def _to_rgb565(self, surface: pygame.Surface) -> bytes:
         import numpy as np
@@ -90,6 +108,7 @@ class Framebuffer:
         return rgb565.T.astype("<u2").tobytes()    # row-major little-endian
 
     def close(self) -> None:
+        self._q.put(None)  # signal writer to exit
         self._map.close()
         self._f.close()
 

@@ -105,12 +105,14 @@ def main():
 
         display.update()
         fps = display.target_fps()
-        if display.draw():
+        drew = display.draw()
+        if drew:
             if fb:
                 fb.flip(screen)
             else:
                 pygame.display.flip()
-        clock.tick(fps)
+        # When nothing changed, cap at 15 fps to avoid burning a core on busy-wait.
+        clock.tick(fps if drew else min(fps, 15))
 
     log.info("Shutting down")
     player.disconnect()
