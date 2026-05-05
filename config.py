@@ -1,13 +1,19 @@
 # ── Scale ─────────────────────────────────────────────────────────────────────
-SCALE         = 1    # set to 0.5 for half-resolution rendering (Pi performance)
+# Physical display pixels (hardware resolution — never scaled).
+DISPLAY_WIDTH  = 720
+DISPLAY_HEIGHT = 720
+
+# Render at a fraction of the display resolution; framebuffer.py scales up.
+# 1.0 = native 720p; 0.667 ≈ 480p (saves ~56% pixels drawn); 0.5 = 360p
+SCALE         = 2/3
 
 def _s(x):              # scale an integer constant
     return max(1, int(x * SCALE))
 
 # ── Windowed / fullscreen ─────────────────────────────────────────────────────
 FULLSCREEN    = False   # True on the Pi, False for desktop debugging
-SCREEN_WIDTH  = _s(720)
-SCREEN_HEIGHT = _s(720)
+SCREEN_WIDTH  = _s(DISPLAY_WIDTH)
+SCREEN_HEIGHT = _s(DISPLAY_HEIGHT)
 ROTATE_DISPLAY = 0      # degrees 0/90/180/270 (for /boot/config.txt approach prefer dtoverlay)
 
 # ── Music library ─────────────────────────────────────────────────────────────

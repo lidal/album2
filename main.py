@@ -8,7 +8,7 @@ import sys
 import logging
 import pygame
 
-from config    import SCREEN_WIDTH, SCREEN_HEIGHT, FULLSCREEN, ROTATE_DISPLAY, VOLUME_SIMULATE
+from config    import SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT, FULLSCREEN, ROTATE_DISPLAY, VOLUME_SIMULATE
 from player    import MopidyPlayer
 from volume    import VolumeController, VolumeSimulator
 from display   import AlbumDisplay
@@ -76,7 +76,7 @@ def main():
     if _BARE_METAL:
         from framebuffer import Framebuffer, EvdevTouch
         try:
-            fb = Framebuffer("/dev/fb0", target_w=SCREEN_WIDTH, target_h=SCREEN_HEIGHT)
+            fb = Framebuffer("/dev/fb0", target_w=DISPLAY_WIDTH, target_h=DISPLAY_HEIGHT)
         except Exception as exc:
             log.error("Cannot open /dev/fb0: %s — display will be blank", exc)
         try:
