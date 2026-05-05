@@ -34,6 +34,11 @@ def _init_display() -> pygame.Surface:
         os.environ["SDL_VIDEODRIVER"] = "offscreen"
         pygame.display.init()
         log.info("SDL video driver: offscreen (frames pushed to /dev/fb0)")
+        try:
+            with open("/dev/tty1", "wb") as _tty:
+                _tty.write(b"\033[?25l")   # hide TTY cursor
+        except Exception:
+            pass
     else:
         if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("SDL_VIDEODRIVER"):
             os.environ["SDL_VIDEODRIVER"] = "wayland"
