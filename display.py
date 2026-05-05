@@ -54,7 +54,7 @@ import pygame
 from PIL import Image
 
 from config import (
-    SCREEN_WIDTH, SCREEN_HEIGHT,
+    SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
     GRID_COLS, GRID_PAD, GRID_TEXT_H,
     MINI_H, TRACKLIST_ART_H, TRACK_ROW_H, CTRL_BAR_H, PROGRESS_H, SCRUB_LEEWAY,
     ANIM_SPEED, FADE_SPEED, CTRL_FADE_SPEED,
@@ -482,15 +482,28 @@ class App:
 
     def _load_art(self, uri: str):
         def _bg():
-            img = self.player.get_album_art(uri)
-            if img:
-                w, h = img.size
-                side = min(w, h)
-                img  = img.crop(((w - side) // 2, (h - side) // 2,
-                                  (w + side) // 2, (h + side) // 2))
-                img  = img.resize((W, H), Image.LANCZOS)
-                self._pending_art = _pil_to_surf(img)
-            else:
+            key  = hashlib.md5(uri.encode()).hexdigest()
+            path = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
+            try:
+                if os.path.exists(path):
+                    img = Image.open(path).convert("RGB")
+                else:
+                    img = self.player.get_album_art(uri)
+                    if img:
+                        dw, dh = img.size
+                        side   = min(dw, dh)
+                        img    = img.crop(((dw - side) // 2, (dh - side) // 2,
+                                           (dw + side) // 2, (dh + side) // 2))
+                        img    = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
+                        img.save(path, "PNG")
+                if img:
+                    if img.size != (W, H):
+                        img = img.resize((W, H), Image.LANCZOS)
+                    self._pending_art = _pil_to_surf(img)
+                else:
+                    self._pending_art = None
+            except Exception as e:
+                log.warning("Art load failed for %s: %s", uri, e)
                 self._pending_art = None
         self._pending_art = "loading"
         threading.Thread(target=_bg, daemon=True).start()
