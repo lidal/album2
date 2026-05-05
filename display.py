@@ -1640,7 +1640,7 @@ class App:
 
         # scrub zone (every view)
         bar_y = self._progress_bar_y()
-        rect(0, bar_y - SCRUB_LEEWAY // 2, W, SCRUB_LEEWAY // 2 + PROGRESS_H)
+        rect(0, bar_y - SCRUB_LEEWAY // 2, W, SCRUB_LEEWAY // 2 + PROGRESS_H + SCRUB_LEEWAY // 4)
 
         # back / close / stop / gear buttons (shared positions)
         bx, by = W - BTN_RADIUS - BTN_MARGIN, BTN_MARGIN + BTN_RADIUS
@@ -2688,7 +2688,7 @@ class App:
 
     def _in_scrub_zone(self, pos) -> bool:
         bar_y = self._progress_bar_y()
-        return bar_y - SCRUB_LEEWAY // 2 <= pos[1] <= bar_y + PROGRESS_H
+        return bar_y - SCRUB_LEEWAY // 2 <= pos[1] <= bar_y + PROGRESS_H + SCRUB_LEEWAY // 4
 
     def _is_lyrics_drag_target(self, pos) -> bool:
         """True when a touch in the lyrics zone should scroll lyrics manually."""
