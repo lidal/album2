@@ -756,11 +756,15 @@ class App:
 
         ay = self._album_y
 
+        import time as _t
+        _ts = [_t.perf_counter()]
+
         # ── layer 1: grid (when album is off-screen or peeking above) ───────────
         if ay > 2 or self._peeking:
             self._draw_grid()
         else:
             self.screen.fill(COL_GRID_BG)
+        _ts.append(_t.perf_counter())
 
         # ── layer 2: tracklist (drawn behind album art so art slides over it) ─
         if ay < -2 and not self._peeking:
@@ -769,6 +773,7 @@ class App:
         # ── layer 3: album art panel ──────────────────────────────────────────
         if ay < H - 1:
             self._draw_album_panel(int(ay))
+        _ts.append(_t.perf_counter())
 
         # ── layer 4: controls overlay (ALBUM only, art fully down) ────────────
         ca = int(self._ctrl_a)
@@ -784,6 +789,15 @@ class App:
         self._draw_volume_badge()
         if settings.get("debug"):
             self._draw_debug_overlays()
+        _ts.append(_t.perf_counter())
+
+        total = _ts[-1] - _ts[0]
+        if total > 0.01:   # log frames that took >10 ms
+            log.info("DRAW %.1fms: bg=%.1f art=%.1f rest=%.1f dirty=%s ay=%.1f fade=%.2f",
+                     total*1000,
+                     (_ts[1]-_ts[0])*1000, (_ts[2]-_ts[1])*1000, (_ts[3]-_ts[2])*1000,
+                     self._dirty, ay, self._art_fade)
+
         return True
 
     # ── draw: grid ────────────────────────────────────────────────────────────
