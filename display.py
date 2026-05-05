@@ -37,6 +37,7 @@ Touch gestures (GRID / peek)
 
 from __future__ import annotations
 import bisect
+import collections
 import concurrent.futures
 import hashlib
 import logging
@@ -271,8 +272,13 @@ class App:
         self._ctrl_a_t = 0.0       # target
 
         # album art
-        self._art:    pygame.Surface | None = None
-        self._art_uri = ""
+        self._art:         pygame.Surface | None = None
+        self._art_uri:     str  = ""
+        self._art_loading: bool = False
+        # LRU in-memory cache: uri → Surface (or None).  Keeps last 8 arts so
+        # switching back to a previous album is instant.
+        self._art_mem: collections.OrderedDict[str, pygame.Surface | None] = \
+            collections.OrderedDict()
 
         # default background
         self._default_bg = self._make_default_bg()
@@ -455,10 +461,13 @@ class App:
         album = self._albums[idx]
         uri   = album["track_uri"]
         key   = hashlib.md5(uri.encode()).hexdigest()
-        path  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.png")
+        path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.jpg")
+        path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.png")  # legacy
         try:
-            if os.path.exists(path):
-                img = Image.open(path).convert("RGB")
+            if os.path.exists(path_jpg):
+                img = Image.open(path_jpg).convert("RGB")
+            elif os.path.exists(path_png):
+                img = Image.open(path_png).convert("RGB")
             else:
                 img = self.player.get_album_art(uri)
                 if img:
@@ -467,7 +476,7 @@ class App:
                     img  = img.crop(((w - side) // 2, (h - side) // 2,
                                       (w + side) // 2, (h + side) // 2))
                     img  = img.resize((_CELL_W, _CELL_W), Image.LANCZOS)
-                    img.save(path, "PNG")
+                    img.save(path_jpg, "JPEG", quality=90)
             album["thumb"] = _pil_to_surf(img) if img else None
         except Exception as e:
             log.debug("Thumb %d: %s", idx, e)
@@ -478,13 +487,30 @@ class App:
 
     # ── album art ─────────────────────────────────────────────────────────────
 
+    _ART_MEM_MAX = 8   # number of full-size art surfaces kept in memory
+
     def _load_art(self, uri: str):
+        # Serve from memory cache instantly when available
+        if uri in self._art_mem:
+            self._art_mem.move_to_end(uri)
+            self._art         = self._art_mem[uri]
+            self._art_loading = False
+            self._dirty       = True
+            return
+
+        self._art         = None   # clear old art so spinner shows
+        self._art_loading = True
+        self._dirty       = True
+
         def _bg():
-            key  = hashlib.md5(uri.encode()).hexdigest()
-            path = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
+            key      = hashlib.md5(uri.encode()).hexdigest()
+            path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
+            path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
             try:
-                if os.path.exists(path):
-                    img = Image.open(path).convert("RGB")
+                if os.path.exists(path_jpg):
+                    img = Image.open(path_jpg).convert("RGB")
+                elif os.path.exists(path_png):
+                    img = Image.open(path_png).convert("RGB")
                 else:
                     img = self.player.get_album_art(uri)
                     if img:
@@ -493,17 +519,22 @@ class App:
                         img    = img.crop(((dw - side) // 2, (dh - side) // 2,
                                            (dw + side) // 2, (dh + side) // 2))
                         img    = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
-                        img.save(path, "PNG")
+                        img.save(path_jpg, "JPEG", quality=90)
                 if img:
                     if img.size != (W, H):
                         img = img.resize((W, H), Image.LANCZOS)
-                    self._pending_art = _pil_to_surf(img)
+                    surf = _pil_to_surf(img)
                 else:
-                    self._pending_art = None
+                    surf = None
             except Exception as e:
                 log.warning("Art load failed for %s: %s", uri, e)
-                self._pending_art = None
-        self._pending_art = "loading"
+                surf = None
+            # Store in memory LRU cache
+            self._art_mem[uri] = surf
+            if len(self._art_mem) > self._ART_MEM_MAX:
+                self._art_mem.popitem(last=False)
+            self._pending_art = surf
+
         threading.Thread(target=_bg, daemon=True).start()
 
     # ── volume ────────────────────────────────────────────────────────────────
@@ -552,8 +583,9 @@ class App:
         pending = getattr(self, "_pending_art", "loading")
         if pending != "loading":
             del self._pending_art
-            self._art = pending   # may be None → use default
-            self._dirty = True
+            self._art         = pending   # may be None → use default
+            self._art_loading = False
+            self._dirty       = True
 
         # mark dirty for ongoing animations/playback BEFORE resolving taps/events
         # so that pending_tap=True is captured before it gets cleared below
@@ -570,6 +602,7 @@ class App:
                 or self._wifi_refreshing
                 or self._scan_refreshing
                 or self._lyrics_loading
+                or self._art_loading
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -698,6 +731,7 @@ class App:
                 or self._wifi_refreshing
                 or self._scan_refreshing
                 or self._lyrics_loading
+                or self._art_loading
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -904,11 +938,28 @@ class App:
     # ── draw: album panel ─────────────────────────────────────────────────────
 
     def _draw_album_panel(self, ay: int):
+        if self._art_loading:
+            self.screen.blit(self._default_bg, (0, ay))
+            self._draw_spinner(W // 2, ay + H // 2)
+            return
         art = self._art or self._default_bg
         # SDL2 maps set_alpha(255) → plain byte-copy (no NEON, ~8× slower on
         # Cortex-A53). Using 254 keeps the NEON alpha-blend path active.
         art.set_alpha(254)
         self.screen.blit(art, (0, ay))
+
+    def _draw_spinner(self, cx: int, cy: int):
+        t     = pygame.time.get_ticks() / 1000.0
+        r     = W // 9
+        n     = 8
+        dot_r = max(4, W // 55)
+        for i in range(n):
+            angle = math.pi * 2 * i / n - t * 4
+            ax = cx + int(r * math.cos(angle))
+            ay = cy + int(r * math.sin(angle))
+            brightness = int(60 + 180 * (i + 1) / n)
+            pygame.gfxdraw.filled_circle(self.screen, ax, ay, dot_r,
+                                         (brightness, brightness, brightness))
 
     # ── draw: controls overlay ────────────────────────────────────────────────
 
