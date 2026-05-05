@@ -458,26 +458,34 @@ class App:
         self._thumb_pool.submit(self._fetch_thumb, idx)
 
     def _fetch_thumb(self, idx: int):
-        album = self._albums[idx]
-        uri   = album["track_uri"]
-        key   = hashlib.md5(uri.encode()).hexdigest()
-        path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.jpg")
-        path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.png")  # legacy
+        album    = self._albums[idx]
+        uri      = album["track_uri"]
+        key      = hashlib.md5(uri.encode()).hexdigest()
+        full_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
+        full_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
         try:
-            if os.path.exists(path_jpg):
-                img = Image.open(path_jpg).convert("RGB")
-            elif os.path.exists(path_png):
-                img = Image.open(path_png).convert("RGB")
+            # Full-size is the primary source of truth; always produce it first.
+            if os.path.exists(full_jpg):
+                full = Image.open(full_jpg).convert("RGB")
+            elif os.path.exists(full_png):
+                full = Image.open(full_png).convert("RGB")
             else:
-                img = self.player.get_album_art(uri)
-                if img:
-                    w, h = img.size
+                raw = self.player.get_album_art(uri)
+                if raw:
+                    w, h = raw.size
                     side = min(w, h)
-                    img  = img.crop(((w - side) // 2, (h - side) // 2,
-                                      (w + side) // 2, (h + side) // 2))
-                    img  = img.resize((_CELL_W, _CELL_W), Image.LANCZOS)
-                    img.save(path_jpg, "JPEG", quality=90)
-            album["thumb"] = _pil_to_surf(img) if img else None
+                    full = raw.crop(((w - side) // 2, (h - side) // 2,
+                                     (w + side) // 2, (h + side) // 2))
+                    full = full.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
+                    full.save(full_jpg, "JPEG", quality=90)
+                else:
+                    full = None
+            # Derive thumbnail from the full-size image.
+            if full:
+                thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
+                album["thumb"] = _pil_to_surf(thumb)
+            else:
+                album["thumb"] = None
         except Exception as e:
             log.debug("Thumb %d: %s", idx, e)
             album["thumb"] = None
