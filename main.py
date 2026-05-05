@@ -36,7 +36,14 @@ def _init_display() -> pygame.Surface:
         log.info("SDL video driver: offscreen (frames pushed to /dev/fb0)")
         try:
             with open("/dev/tty1", "wb") as _tty:
-                _tty.write(b"\033[?25l")   # hide TTY cursor
+                _tty.write(b"\033[?25l"    # hide cursor
+                           b"\033[2J"      # clear screen
+                           b"\033[H")      # cursor to home (keeps it off visible area)
+        except Exception:
+            pass
+        try:
+            with open("/sys/class/graphics/fbcon/cursor_blink", "w") as _f:
+                _f.write("0")              # disable blink at kernel level
         except Exception:
             pass
     else:
