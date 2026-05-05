@@ -5,7 +5,7 @@ DISPLAY_HEIGHT = 720
 
 # Render at a fraction of the display resolution; framebuffer.py scales up.
 # 1.0 = native 720p; 0.667 ≈ 480p (saves ~56% pixels drawn); 0.5 = 360p
-SCALE         = 2/3
+SCALE         = 3/3
 
 def _s(x):              # scale an integer constant
     return max(1, int(x * SCALE))
@@ -130,7 +130,7 @@ COL_VOLUME_FG     = COL_HIGHLIGHT
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 # Set to a .ttf path for a nicer typeface, e.g.:
 #   /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-FONT_PATH = "/usr/share/fonts/TTF/DejaVuSans.ttf"
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"#"/usr/share/fonts/TTF/DejaVuSans.ttf"
 
 FONT_SZ_TITLE   = _s(34)
 FONT_SZ_ARTIST  = _s(19)
