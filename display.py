@@ -93,9 +93,10 @@ _BTN_ICON_COL = (0, 0, 0) if sum(COL_HIGHLIGHT[:3]) / 3 > 127.5 else (255, 255, 
 _TL_ALBUM_Y = TRACKLIST_ART_H - H   # e.g. 224 - 720 = -496
 
 # grid geometry
-_CELL_W = (W - GRID_PAD * (GRID_COLS + 1)) // GRID_COLS
-_CELL_H = _CELL_W + GRID_TEXT_H
-_ROW_H  = _CELL_H + GRID_PAD
+_CELL_W      = (W - GRID_PAD * (GRID_COLS + 1)) // GRID_COLS
+_CELL_H      = _CELL_W + GRID_TEXT_H
+_ROW_H       = _CELL_H + GRID_PAD
+_THUMB_FILE_W = max(1, _CELL_W * 2 // 3)   # on-disk cache size (~200px); upsampled to _CELL_W on load
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -459,39 +460,47 @@ class App:
         self._thumb_pool.submit(self._fetch_thumb, idx)
 
     def _fetch_thumb(self, idx: int):
-        album    = self._albums[idx]
-        uri      = album["track_uri"]
-        key      = hashlib.md5(uri.encode()).hexdigest()
-        full_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
-        full_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
+        album     = self._albums[idx]
+        uri       = album["track_uri"]
+        key       = hashlib.md5(uri.encode()).hexdigest()
+        thumb_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_THUMB_FILE_W}.jpg")
+        full_jpg  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
+        full_png  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
         try:
-            # Full-size is the primary source of truth; always produce it first.
-            if os.path.exists(full_jpg):
-                full = Image.open(full_jpg).convert("RGB")
-            elif os.path.exists(full_png):
-                full = Image.open(full_png).convert("RGB")
+            if os.path.exists(thumb_jpg) and os.path.exists(full_jpg):
+                # Both cached — fast path: load each directly.
+                thumb = Image.open(thumb_jpg).convert("RGB")
+                full  = Image.open(full_jpg).convert("RGB")
             else:
-                raw = self.player.get_album_art(uri)
-                if raw:
-                    w, h = raw.size
-                    side = min(w, h)
-                    full = raw.crop(((w - side) // 2, (h - side) // 2,
-                                     (w + side) // 2, (h + side) // 2))
-                    full = full.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
-                    full.save(full_jpg, "JPEG", quality=90)
+                # Need the full-size image to (re)generate missing files.
+                if os.path.exists(full_jpg):
+                    full = Image.open(full_jpg).convert("RGB")
+                elif os.path.exists(full_png):
+                    full = Image.open(full_png).convert("RGB")
                 else:
-                    full = None
-            # Derive thumbnail and populate the full-size memory cache.
+                    raw = self.player.get_album_art(uri)
+                    if raw:
+                        w, h = raw.size
+                        side = min(w, h)
+                        full = raw.crop(((w - side) // 2, (h - side) // 2,
+                                         (w + side) // 2, (h + side) // 2))
+                        full = full.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
+                        full.save(full_jpg, "JPEG", quality=90)
+                    else:
+                        full = None
+                if full and not os.path.exists(thumb_jpg):
+                    thumb = full.resize((_THUMB_FILE_W, _THUMB_FILE_W), Image.LANCZOS)
+                    thumb.save(thumb_jpg, "JPEG", quality=85)
+                else:
+                    thumb = full
+
             if full:
-                if full.size != (W, H):
-                    full_wh = full.resize((W, H), Image.LANCZOS)
-                else:
-                    full_wh = full
+                full_wh = full.resize((W, H), Image.LANCZOS) if full.size != (W, H) else full
                 self._art_mem[uri] = _pil_to_surf(full_wh)
                 if len(self._art_mem) > self._ART_MEM_MAX:
                     self._art_mem.popitem(last=False)
-                thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
-                album["thumb"] = _pil_to_surf(thumb)
+                thumb_surf = thumb.resize((_CELL_W, _CELL_W), Image.LANCZOS) if thumb.size != (_CELL_W, _CELL_W) else thumb
+                album["thumb"] = _pil_to_surf(thumb_surf)
             else:
                 self._art_mem[uri] = None
                 album["thumb"] = None

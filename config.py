@@ -5,7 +5,7 @@ DISPLAY_HEIGHT = 720
 
 # Render at a fraction of the display resolution; framebuffer.py scales up.
 # 1.0 = native 720p; 0.667 ≈ 480p (saves ~56% pixels drawn); 0.5 = 360p
-SCALE         = 2/3
+SCALE         = 1.0
 
 def _s(x):              # scale an integer constant
     return max(1, int(x * SCALE))
