@@ -272,9 +272,10 @@ class App:
         self._ctrl_a_t = 0.0       # target
 
         # album art
-        self._art:         pygame.Surface | None = None
-        self._art_uri:     str  = ""
-        self._art_loading: bool = False
+        self._art:           pygame.Surface | None = None
+        self._art_uri:       str  = ""   # current playing track URI (dedup)
+        self._art_album_uri: str  = ""   # canonical first-track URI used as art key
+        self._art_loading:   bool = False
         # LRU in-memory cache: uri → Surface (or None).  Keeps last 8 arts so
         # switching back to a previous album is instant.
         self._art_mem: collections.OrderedDict[str, pygame.Surface | None] = \
@@ -715,7 +716,14 @@ class App:
             if (new_uri and new_uri != self._art_uri
                     and self._view in (View.ALBUM, View.TRACKLIST)):
                 self._art_uri = new_uri
-                self._load_art(new_uri)
+                # Use the album's canonical first-track URI as the art key so
+                # track changes within the same album never trigger a reload.
+                canonical = (self._albums[self._cur_idx]["track_uri"]
+                             if self._cur_idx is not None and self._cur_idx < len(self._albums)
+                             else new_uri)
+                if canonical != self._art_album_uri:
+                    self._art_album_uri = canonical
+                    self._load_art(canonical)
             # reload lyrics whenever the track changes
             if new_uri and new_uri != self._lyrics_uri and not self._lyrics_loading:
                 self._lyrics_uri     = new_uri
@@ -1226,8 +1234,9 @@ class App:
 
         # start art loading immediately from cached track_uri
         uri = album["track_uri"]
-        if uri != self._art_uri:
-            self._art_uri = uri
+        if uri != self._art_album_uri:
+            self._art_uri       = uri
+            self._art_album_uri = uri
             self._load_art(uri)
 
         # load tracks + pause at track 0 in background
@@ -1257,8 +1266,9 @@ class App:
         self.player.stop()
         self._cur_idx  = None
         self._tracks   = []
-        self._art     = None
-        self._art_uri = ""
+        self._art           = None
+        self._art_uri       = ""
+        self._art_album_uri = ""
         self._album_y_t = float(H)
         self._ctrl_a    = 0.0
         self._ctrl_a_t  = 0.0
