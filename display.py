@@ -1364,11 +1364,9 @@ class App:
 
     def _load_lyrics_for_uri(self, uri: str) -> str | None:
         path = self._resolve_music_path(uri)
-        if not path:
-            return None
 
-        # 1. embedded tags (FLAC)
-        if path.lower().endswith(".flac"):
+        # 1. embedded tags (FLAC / MP3 via mutagen)
+        if path and path.lower().endswith(".flac"):
             try:
                 from mutagen.flac import FLAC
                 f = FLAC(path)
@@ -1376,19 +1374,40 @@ class App:
                     if tag in f:
                         return "\n".join(f[tag])
             except ImportError:
-                log.debug("mutagen not installed — no embedded lyrics")
+                pass
             except Exception as e:
                 log.debug("lyrics embedded load: %s", e)
 
         # 2. sidecar .lrc file (same dir, same stem)
-        try:
-            stem = os.path.splitext(path)[0]
-            lrc_path = stem + ".lrc"
-            if os.path.exists(lrc_path):
-                with open(lrc_path, encoding="utf-8", errors="replace") as fh:
-                    return fh.read()
-        except Exception as e:
-            log.debug("lyrics lrc load: %s", e)
+        if path:
+            try:
+                lrc_path = os.path.splitext(path)[0] + ".lrc"
+                if os.path.exists(lrc_path):
+                    with open(lrc_path, encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+            except Exception as e:
+                log.debug("lyrics lrc load: %s", e)
+
+        # 3. lyrics.ovh API (free, no key required)
+        song   = self._song
+        artist = (song.get("artist") or song.get("albumartist") or "").strip()
+        title  = (song.get("title") or "").strip()
+        if artist and title:
+            try:
+                import urllib.parse
+                url = ("https://api.lyrics.ovh/v1/"
+                       + urllib.parse.quote(artist) + "/"
+                       + urllib.parse.quote(title))
+                r = __import__("requests").get(url, timeout=10)
+                if r.status_code == 200:
+                    text = r.json().get("lyrics", "").strip()
+                    if text:
+                        log.info("Lyrics fetched from lyrics.ovh for %s – %s", artist, title)
+                        return text
+                else:
+                    log.debug("lyrics.ovh: %s %s/%s", r.status_code, artist, title)
+            except Exception as e:
+                log.debug("lyrics.ovh fetch failed: %s", e)
 
         return None
 
