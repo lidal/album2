@@ -96,7 +96,6 @@ _TL_ALBUM_Y = TRACKLIST_ART_H - H   # e.g. 224 - 720 = -496
 _CELL_W      = (W - GRID_PAD * (GRID_COLS + 1)) // GRID_COLS
 _CELL_H      = _CELL_W + GRID_TEXT_H
 _ROW_H       = _CELL_H + GRID_PAD
-_THUMB_FILE_W = max(1, _CELL_W * 2 // 3)   # on-disk cache size (~200px); upsampled to _CELL_W on load
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -463,7 +462,7 @@ class App:
         album     = self._albums[idx]
         uri       = album["track_uri"]
         key       = hashlib.md5(uri.encode()).hexdigest()
-        thumb_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_THUMB_FILE_W}.jpg")
+        thumb_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.jpg")
         full_jpg  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")
         full_png  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")  # legacy
         try:
@@ -489,7 +488,7 @@ class App:
                     else:
                         full = None
                 if full and not os.path.exists(thumb_jpg):
-                    thumb = full.resize((_THUMB_FILE_W, _THUMB_FILE_W), Image.LANCZOS)
+                    thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
                     thumb.save(thumb_jpg, "JPEG", quality=85)
                 else:
                     thumb = full
