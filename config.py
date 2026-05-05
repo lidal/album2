@@ -46,7 +46,7 @@ VOLUME_INVERT      = False
 
 # ── Performance ───────────────────────────────────────────────────────────────
 FPS            = 60          # Smooth control
-THUMB_WORKERS  = 2           # parallel thumbnail fetch threads
+THUMB_WORKERS  = 1           # parallel thumbnail fetch threads (keep low on Pi Zero)
 SCROLL_FRICTION = 0.95       # per-frame velocity multiplier (higher = less friction)
 
 # ── Grid ──────────────────────────────────────────────────────────────────────

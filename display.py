@@ -118,7 +118,7 @@ def _pil_to_surf(img: Image.Image) -> pygame.Surface:
 
 
 _SURF_CACHE: dict = {}
-_SURF_CACHE_MAX = 800
+_SURF_CACHE_MAX = 300
 
 def _render_text(font, text: str, colour, max_w: int = 0) -> pygame.Surface:
     key = (id(font), text, colour, max_w)
@@ -504,7 +504,7 @@ class App:
 
     # ── album art ─────────────────────────────────────────────────────────────
 
-    _ART_MEM_MAX = 8   # number of full-size art surfaces kept in memory
+    _ART_MEM_MAX = 3   # full-size art surfaces kept in memory (~2 MB each)
 
     def _load_art(self, uri: str):
         # Serve from memory cache instantly when available
