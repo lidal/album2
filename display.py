@@ -1353,10 +1353,22 @@ class App:
     def _clear_thumb_cache(self):
         try:
             for fname in os.listdir(_THUMB_CACHE_DIR):
-                if fname.endswith(".png"):
+                if fname.endswith(".png") or fname.endswith(".jpg"):
                     os.remove(os.path.join(_THUMB_CACHE_DIR, fname))
         except Exception as e:
             log.warning("clear cache: %s", e)
+        # Drop in-memory art cache and reset all album thumbs so they reload
+        self._art_mem.clear()
+        self._art     = None
+        self._art_uri = ""
+        self._art_album_uri = ""
+        for album in self._albums:
+            album["thumb"]         = None
+            album["thumb_loading"] = False
+        self._thumb_queued.clear()
+        self._thumbs_pending = len(self._albums)
+        for i in range(len(self._albums)):
+            self._queue_thumb(i)
         self._cache_cleared_ms = pygame.time.get_ticks()
         self._dirty = True
 
