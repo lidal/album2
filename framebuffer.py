@@ -20,11 +20,13 @@ FBIOPUT_VSCREENINFO = 0x4601
 _EV_FMT = "qqHHi"
 _EV_SZ  = struct.calcsize(_EV_FMT)
 
+EV_SYN    = 0
 EV_KEY    = 1
 EV_ABS    = 3
 ABS_X     = 0
 ABS_Y     = 1
 BTN_TOUCH = 330
+SYN_REPORT = 0
 
 
 def _eviocgabs(axis: int) -> int:
@@ -118,6 +120,9 @@ class EvdevTouch:
             log.warning("EvdevTouch init failed: %s", exc)
 
     def _run(self, f) -> None:
+        pressed        = False
+        pending_press  = False
+        pending_release = False
         try:
             while True:
                 data = f.read(_EV_SZ)
@@ -130,14 +135,25 @@ class EvdevTouch:
                     elif code == ABS_Y:
                         self._y = self._sh - 1 - int(value * self._sh / self._max_y)
                 elif etype == EV_KEY and code == BTN_TOUCH:
-                    pos = (self._x, self._y)
                     if value:
+                        pending_press = True
+                    else:
+                        pending_release = True
+                elif etype == EV_SYN and code == SYN_REPORT:
+                    # All events for this frame are in — fire with correct position
+                    pos = (self._x, self._y)
+                    if pending_press:
+                        pending_press = False
+                        pressed = True
                         pygame.event.post(pygame.event.Event(
                             pygame.MOUSEBUTTONDOWN, button=1, pos=pos))
-                        pygame.event.post(pygame.event.Event(
-                            pygame.MOUSEMOTION, pos=pos, rel=(0, 0), buttons=(1, 0, 0)))
-                    else:
+                    elif pending_release:
+                        pending_release = False
+                        pressed = False
                         pygame.event.post(pygame.event.Event(
                             pygame.MOUSEBUTTONUP, button=1, pos=pos))
+                    elif pressed:
+                        pygame.event.post(pygame.event.Event(
+                            pygame.MOUSEMOTION, pos=pos, rel=(0, 0), buttons=(1, 0, 0)))
         except Exception as exc:
             log.warning("EvdevTouch read error: %s", exc)
