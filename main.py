@@ -93,6 +93,8 @@ def main():
 
     clock   = pygame.time.Clock()
     running = True
+    _t_prof = [0.0] * 4   # [update, draw, flip, tick]
+    _n_prof = 0
 
     while running:
         for event in pygame.event.get():
@@ -103,14 +105,33 @@ def main():
             else:
                 display.handle_event(event)
 
+        import time as _time
+        _t0 = _time.perf_counter()
         display.update()
+        _t1 = _time.perf_counter()
         fps = display.target_fps()
-        if display.draw():
+        drew = display.draw()
+        _t2 = _time.perf_counter()
+        if drew:
             if fb:
                 fb.flip(screen)
             else:
                 pygame.display.flip()
+        _t3 = _time.perf_counter()
         clock.tick(fps)
+        _t4 = _time.perf_counter()
+
+        _t_prof[0] += _t1 - _t0
+        _t_prof[1] += _t2 - _t1
+        _t_prof[2] += _t3 - _t2
+        _t_prof[3] += _t4 - _t3
+        _n_prof += 1
+        if _n_prof == 120:
+            log.info("PERF 120f: update=%.1fms draw=%.1fms flip=%.1fms tick=%.1fms",
+                     _t_prof[0]/_n_prof*1000, _t_prof[1]/_n_prof*1000,
+                     _t_prof[2]/_n_prof*1000, _t_prof[3]/_n_prof*1000)
+            _t_prof = [0.0] * 4
+            _n_prof = 0
 
     log.info("Shutting down")
     player.disconnect()
