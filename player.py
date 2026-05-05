@@ -9,12 +9,14 @@ Album art / images come from the Mopidy HTTP JSON-RPC API because it handles
 all back-ends (local files, Spotify, etc.) transparently.
 """
 from __future__ import annotations
+import os
 import threading
 import time
 import io
 import logging
 import shutil
 import subprocess
+import urllib.parse
 
 import mpd
 import requests
@@ -22,7 +24,7 @@ from PIL import Image
 
 from config import (
     MOPIDY_HOST, MOPIDY_MPD_PORT, MOPIDY_HTTP_PORT, MOPIDY_PASSWORD,
-    VOLUME_BACKEND,
+    VOLUME_BACKEND, MUSIC_DIR,
 )
 
 log = logging.getLogger(__name__)
@@ -395,22 +397,49 @@ class MopidyPlayer:
     # ── album art ─────────────────────────────────────────────────────────────
 
     def get_album_art(self, uri: str) -> Image.Image | None:
-        """Fetch cover art for *uri* via Mopidy's images API. Returns PIL Image or None."""
+        """Fetch cover art for *uri*. Tries Mopidy images API first, then cover.jpg on disk."""
         if not uri:
             return None
+
+        # 1. Mopidy images API (works for embedded art and some backends)
         result = self._rpc("core.library.get_images", uris=[uri])
         images = (result or {}).get(uri, [])
-        if not images:
+        if images:
+            img_uri = images[0]["uri"]
+            if not img_uri.startswith("http"):
+                img_uri = f"http://{MOPIDY_HOST}:{MOPIDY_HTTP_PORT}{img_uri}"
+            try:
+                r = requests.get(img_uri, timeout=10)
+                return Image.open(io.BytesIO(r.content)).convert("RGB")
+            except Exception as e:
+                log.warning("Art download failed: %s", e)
+
+        # 2. Filesystem fallback: look for cover.jpg / folder.jpg next to the track
+        cover = self._cover_from_uri(uri)
+        if cover:
+            return cover
+
+        return None
+
+    _COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png",
+                    "folder.jpg", "folder.jpeg", "front.jpg", "front.jpeg")
+
+    def _cover_from_uri(self, uri: str) -> Image.Image | None:
+        """Resolve a local:track: URI to a cover image on disk."""
+        if not uri.startswith("local:track:"):
             return None
-        img_uri = images[0]["uri"]
-        if not img_uri.startswith("http"):
-            img_uri = f"http://{MOPIDY_HOST}:{MOPIDY_HTTP_PORT}{img_uri}"
-        try:
-            r = requests.get(img_uri, timeout=10)
-            return Image.open(io.BytesIO(r.content)).convert("RGB")
-        except Exception as e:
-            log.warning("Art download failed: %s", e)
-            return None
+        media_dir = MUSIC_DIR or os.path.expanduser("~/Music")
+        rel = urllib.parse.unquote(uri[len("local:track:"):])
+        track_path = os.path.join(media_dir, rel)
+        folder = os.path.dirname(track_path)
+        for name in self._COVER_NAMES:
+            candidate = os.path.join(folder, name)
+            if os.path.isfile(candidate):
+                try:
+                    return Image.open(candidate).convert("RGB")
+                except Exception as e:
+                    log.warning("Cover load failed %s: %s", candidate, e)
+        return None
 
     # ── cleanup ───────────────────────────────────────────────────────────────
 
