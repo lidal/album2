@@ -57,7 +57,7 @@ from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
     GRID_COLS, GRID_PAD, GRID_TEXT_H,
     MINI_H, TRACKLIST_ART_H, TRACK_ROW_H, CTRL_BAR_H, PROGRESS_H, SCRUB_LEEWAY,
-    ANIM_SPEED, FADE_SPEED, CTRL_FADE_SPEED,
+    ANIM_SPEED, CTRL_FADE_SPEED,
     SWIPE_V_MIN, SWIPE_H_MIN, TAP_MAX_MOVE, TAP_MAX_MS, DOUBLE_TAP_MS, DRAG_THRESH,
     VOLUME_BADGE_MS, CTRL_TIMEOUT_MS, SCROLL_FRICTION, FPS,
     BTN_MARGIN, BTN_RADIUS, BTN_GAP, CTRL_ICON_SM, CTRL_ICON_LG, CTRL_TEXT_GAP,
@@ -270,11 +270,9 @@ class App:
         self._ctrl_a  = 0.0        # controls overlay alpha (current)
         self._ctrl_a_t = 0.0       # target
 
-        # album art crossfade
-        self._art:      pygame.Surface | None = None
-        self._art_prev: pygame.Surface | None = None
-        self._art_fade  = 1.0
-        self._art_uri   = ""
+        # album art
+        self._art:    pygame.Surface | None = None
+        self._art_uri = ""
 
         # default background
         self._default_bg = self._make_default_bg()
@@ -550,16 +548,12 @@ class App:
             else:
                 self._settings_vel = 0.0
 
-        if self._art_fade < 1.0:
-            self._art_fade = min(1.0, self._art_fade + FADE_SPEED * dt)
-
         # pick up finished art load
         pending = getattr(self, "_pending_art", "loading")
         if pending != "loading":
             del self._pending_art
-            self._art_prev = self._art
-            self._art      = pending   # may be None → use default
-            self._art_fade = 0.0
+            self._art = pending   # may be None → use default
+            self._dirty = True
 
         # mark dirty for ongoing animations/playback BEFORE resolving taps/events
         # so that pending_tap=True is captured before it gets cleared below
@@ -567,7 +561,7 @@ class App:
             self._dirty = (
                 abs(self._album_y - self._album_y_t) > 0.5
                 or abs(self._ctrl_a - self._ctrl_a_t) > 0.5
-                or self._art_fade < 1.0
+
                 or self._flash_alpha > 0
                 or self._pending_tap
                 or self._progress_px_changed()
@@ -695,7 +689,7 @@ class App:
             self._dirty = (
                 abs(self._album_y - self._album_y_t) > 0.5
                 or abs(self._ctrl_a - self._ctrl_a_t) > 0.5
-                or self._art_fade < 1.0
+
                 or self._flash_alpha > 0
                 or self._pending_tap
                 or self._progress_px_changed()
@@ -911,20 +905,10 @@ class App:
 
     def _draw_album_panel(self, ay: int):
         art = self._art or self._default_bg
-
-        if self._art_fade < 1.0 and self._art_prev is not None:
-            prev = self._art_prev or self._default_bg
-            # SDL2 on ARM uses NEON for alpha=1-254; keep prev on that path too
-            prev.set_alpha(254)
-            self.screen.blit(prev, (0, ay))
-            if self._art_fade > 0:
-                art.set_alpha(int(254 * self._art_fade))
-                self.screen.blit(art, (0, ay))
-        else:
-            # SDL2 maps set_alpha(255) → plain byte-copy (no NEON, ~8× slower on
-            # Cortex-A53). Using 254 keeps the NEON alpha-blend path active.
-            art.set_alpha(254)
-            self.screen.blit(art, (0, ay))
+        # SDL2 maps set_alpha(255) → plain byte-copy (no NEON, ~8× slower on
+        # Cortex-A53). Using 254 keeps the NEON alpha-blend path active.
+        art.set_alpha(254)
+        self.screen.blit(art, (0, ay))
 
     # ── draw: controls overlay ────────────────────────────────────────────────
 
@@ -1206,9 +1190,8 @@ class App:
         self.player.stop()
         self._cur_idx  = None
         self._tracks   = []
-        self._art      = None
-        self._art_prev = None
-        self._art_uri  = ""
+        self._art     = None
+        self._art_uri = ""
         self._album_y_t = float(H)
         self._ctrl_a    = 0.0
         self._ctrl_a_t  = 0.0
