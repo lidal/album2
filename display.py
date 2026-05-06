@@ -415,7 +415,7 @@ class App:
         self._last_tick_ms = pygame.time.get_ticks()
         # elapsed interpolation: base value + wall-clock time since that poll
         self._elapsed_base   = 0.0
-        self._elapsed_base_t = 0.0
+        self._elapsed_base_t = time.monotonic()
         self._last_progress_px = -1   # last drawn progress bar pixel; avoids spurious dirty
 
         # thumbnail loader
