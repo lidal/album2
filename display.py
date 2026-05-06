@@ -493,7 +493,7 @@ class App:
                         full = None
                 if full and not os.path.exists(thumb_jpg):
                     thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
-                    thumb.save(thumb_jpg, "JPEG", quality=85)
+                    thumb.save(thumb_jpg, "JPEG", quality=60)
                 else:
                     thumb = full
 
