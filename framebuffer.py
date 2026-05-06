@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 FBIOGET_VSCREENINFO = 0x4600
 FBIOPUT_VSCREENINFO = 0x4601
+FBIOPAN_DISPLAY     = 0x4606
 
 # input_event on 64-bit Linux: two int64 (timeval) + uint16 type + uint16 code + int32 value
 _EV_FMT = "qqHHi"
@@ -66,8 +67,29 @@ class Framebuffer:
         self.height         = yres
         self.bpp            = bpp
         self._fmt           = "BGRA" if r_off > b_off else "RGBA"
-        self._map           = mmap.mmap(self._f.fileno(), xres * yres * (bpp // 8))
-        log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
+        self._vinfo         = vinfo   # kept for FBIOPAN_DISPLAY calls
+
+        # Try to enable double buffering: allocate yres_virtual = 2*yres so we
+        # can write to the hidden buffer and flip atomically, eliminating tearing.
+        self._dbl  = False
+        self._back = 0   # which half (0 or 1) we write into next
+        try:
+            v2 = bytearray(vinfo)
+            struct.pack_into("I", v2, 12, yres * 2)   # yres_virtual = 2*yres
+            struct.pack_into("I", v2, 20, 0)           # yoffset = 0
+            fcntl.ioctl(self._f, FBIOPUT_VSCREENINFO, bytes(v2))
+            v2 = bytearray(fcntl.ioctl(self._f, FBIOGET_VSCREENINFO, bytes(160)))
+            if struct.unpack_from("I", v2, 12)[0] >= yres * 2:
+                self._dbl   = True
+                self._vinfo = v2
+                self._map   = mmap.mmap(self._f.fileno(), xres * yres * 2 * (bpp // 8))
+                log.info("Framebuffer %s: %dx%d %dbpp %s (double-buffered)", device, xres, yres, bpp, self._fmt)
+            else:
+                raise RuntimeError("driver did not accept yres_virtual=2*yres")
+        except Exception as exc:
+            log.info("Framebuffer double-buffer unavailable (%s), using single buffer", exc)
+            self._map = mmap.mmap(self._f.fileno(), xres * yres * (bpp // 8))
+            log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
 
         # Worker thread owns the mmap write; GIL is released during I/O so this
         # runs on a second core while the main thread renders the next frame.
@@ -75,12 +97,27 @@ class Framebuffer:
         threading.Thread(target=self._writer, daemon=True).start()
 
     def _writer(self) -> None:
+        frame_bytes = self.width * self.height * (self.bpp // 8)
         while True:
             data = self._q.get()
             if data is None:
                 return
-            self._map.seek(0)
-            self._map.write(data)
+            if self._dbl:
+                # Write into the hidden back buffer, then flip to show it.
+                # The display never reads what we're currently writing.
+                back = self._back
+                self._map.seek(back * frame_bytes)
+                self._map.write(data)
+                vinfo = bytearray(self._vinfo)
+                struct.pack_into("I", vinfo, 20, back * self.height)  # yoffset
+                try:
+                    fcntl.ioctl(self._f, FBIOPAN_DISPLAY, bytes(vinfo))
+                except Exception as e:
+                    log.warning("FBIOPAN_DISPLAY failed: %s", e)
+                self._back = 1 - back
+            else:
+                self._map.seek(0)
+                self._map.write(data)
 
     def flip(self, surface: pygame.Surface) -> None:
         if surface.get_width() != self.width or surface.get_height() != self.height:
