@@ -698,8 +698,8 @@ class App:
                 self._scan_refreshing   = True
                 paired_addrs = {d["address"] for d in self._bt_devices}
                 def _refresh(pa=paired_addrs):
-                    all_devs = self.bt.get_all_devices()
-                    self._scan_devices    = [d for d in all_devs if d["address"] not in pa]
+                    discovered = self.bt.get_discovered_devices()
+                    self._scan_devices    = [d for d in discovered if d["address"] not in pa]
                     self._scan_refreshing = False
                     self._dirty           = True
                 threading.Thread(target=_refresh, daemon=True).start()

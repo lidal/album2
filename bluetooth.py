@@ -20,6 +20,30 @@ def _run(*args, timeout=5) -> str:
         raise RuntimeError(e) from e
 
 
+def _dbus_get_devices() -> list[dict]:
+    """Query paired/connected state via D-Bus (works on BlueZ 5.50)."""
+    import dbus
+    bus = dbus.SystemBus()
+    obj = bus.get_object("org.bluez", "/")
+    iface = dbus.Interface(obj, "org.freedesktop.DBus.ObjectManager")
+    objs = iface.GetManagedObjects()
+    devices = []
+    for path, ifaces in objs.items():
+        if "org.bluez.Device1" not in ifaces:
+            continue
+        dev = ifaces["org.bluez.Device1"]
+        if not dev.get("Paired", False):
+            continue
+        addr = str(dev.get("Address", ""))
+        devices.append({
+            "address":   addr,
+            "name":      str(dev.get("Name", addr)),
+            "connected": bool(dev.get("Connected", False)),
+            "trusted":   bool(dev.get("Trusted", False)),
+        })
+    return devices
+
+
 class BluetoothManager:
     def __init__(self):
         self.available   = False
@@ -33,36 +57,12 @@ class BluetoothManager:
 
     # ── paired devices ────────────────────────────────────────────────────────
 
-    def _addr_set(self, *filter_args) -> set[str]:
-        try:
-            out = _run("devices", *filter_args)
-            result = set()
-            for line in out.splitlines():
-                p = line.strip().split()
-                if len(p) >= 2 and p[0] == "Device":
-                    result.add(p[1])
-            return result
-        except Exception:
-            return set()
-
     def get_devices(self) -> list[dict]:
+        """Return paired devices using D-Bus (bluetoothctl filter args not in BlueZ 5.50)."""
         if not self.available:
             return []
         try:
-            paired_out      = _run("devices", "Paired")
-            connected_addrs = self._addr_set("Connected")
-            trusted_addrs   = self._addr_set("Trusted")
-            devices = []
-            for line in paired_out.splitlines():
-                parts = line.strip().split(None, 2)
-                if len(parts) >= 2 and parts[0] == "Device":
-                    addr = parts[1]
-                    devices.append({
-                        "address":   addr,
-                        "name":      parts[2] if len(parts) > 2 else addr,
-                        "connected": addr in connected_addrs,
-                        "trusted":   addr in trusted_addrs,
-                    })
+            devices = _dbus_get_devices()
             return sorted(devices, key=lambda d: d["name"].casefold())
         except Exception as e:
             log.warning("get_devices: %s", e)
@@ -73,7 +73,7 @@ class BluetoothManager:
     def start_scan(self):
         if self._scan_proc is not None:
             return
-        self._name_cache: dict[str, str] = {}
+        self._name_cache = {}
         try:
             self._scan_proc = subprocess.Popen(
                 ["bluetoothctl"],
@@ -130,29 +130,10 @@ class BluetoothManager:
         except Exception:
             pass
 
-    def get_all_devices(self) -> list[dict]:
-        """All known devices (paired + recently discovered)."""
-        if not self.available:
-            return []
-        try:
-            out = _run("devices")
-            devices = []
-            for line in out.splitlines():
-                parts = line.strip().split(None, 2)
-                if len(parts) >= 2 and parts[0] == "Device":
-                    addr = parts[1]
-                    btctl_name = parts[2] if len(parts) > 2 else ""
-                    is_mac = btctl_name.replace("-", ":").upper() == addr.upper()
-                    # prefer stream-resolved name, then bluetoothctl name, skip MAC-only
-                    name = (self._name_cache.get(addr)
-                            or (btctl_name if not is_mac else "")
-                            or None)
-                    if name:
-                        devices.append({"address": addr, "name": name})
-            return devices
-        except Exception as e:
-            log.warning("get_all_devices: %s", e)
-            return []
+    def get_discovered_devices(self) -> list[dict]:
+        """Devices seen during the current scan session only (from _name_cache)."""
+        return [{"address": addr, "name": name}
+                for addr, name in self._name_cache.items()]
 
     # ── pairing ───────────────────────────────────────────────────────────────
 
