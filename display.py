@@ -317,6 +317,10 @@ class App:
         self._wifi_refreshing: bool = False
         self._wifi_menu_net: dict | None = None
 
+        # power state for BT/WiFi header toggles
+        self._bt_powered: bool = True
+        self._wifi_powered: bool = True
+
         # touch calibration
         self._cal_points:      list[tuple[int,int]] = []
         self._cal_raw:         list[tuple[float,float]] = []
@@ -1319,12 +1323,14 @@ class App:
             self._bt_refreshing   = True
             self._bt_last_refresh = pygame.time.get_ticks()
             def _refresh_bt():
+                self._bt_powered    = self.bt.is_powered()
                 self._bt_devices    = self.bt.get_devices()
                 self._bt_refreshing = False
             threading.Thread(target=_refresh_bt, daemon=True).start()
         if self.wifi and self.wifi.available and not self._wifi_refreshing:
             self._wifi_refreshing = True
             def _refresh_wifi():
+                self._wifi_powered   = self.wifi.is_enabled()
                 self._wifi_networks  = self.wifi.get_networks()
                 self._wifi_refreshing = False
                 self._dirty = True
@@ -1686,8 +1692,8 @@ class App:
 
         elif self._view == View.SETTINGS:
             circle(bx, by, BTN_RADIUS + 10)
-            bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-            wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+            bt_rows   = self._bt_row_count()
+            wifi_rows = self._wifi_row_count()
             total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9
             for i in range(total_rows):
                 probe = (W // 2, self._settings_row_y(i) + TRACK_ROW_H // 2)
@@ -1841,8 +1847,8 @@ class App:
         pygame.draw.aaline(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
 
         # compute total content height from row count (independent of scroll)
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9   # SYSTEM(hdr+cache+debug) + TOUCH(hdr+cal+reset) + POWER(hdr+restart+shutdown)
         content_h  = total_rows * TRACK_ROW_H + BTN_MARGIN * 2
         max_scroll  = max(0.0, float(content_h - clip_h))
@@ -1870,31 +1876,34 @@ class App:
         if self.bt and self.bt.available:
             sh = _render_text(self._f_track_sm, "BLUETOOTH", COL_TEXT_ALBUM)
             self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
+            self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, self._bt_powered)
             pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
 
-            dot_r = max(2, TRACK_ROW_H // 8)
-            dot_x = W - BTN_MARGIN - dot_r
-            for dev in self._bt_devices:
-                busy = self._bt_action_addr == dev["address"]
-                col  = COL_TRACK_NUM if busy else COL_TRACK_NORMAL
-                sl   = _render_text(self._f_track, dev["name"], col)
-                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
-                dot_col = COL_HIGHLIGHT if dev["connected"] and not busy else COL_SEP
-                dot_cy  = y + TRACK_ROW_H // 2
-                pygame.gfxdraw.filled_circle(self.screen, dot_x, dot_cy, dot_r, dot_col)
-                pygame.gfxdraw.aacircle(self.screen, dot_x, dot_cy, dot_r, dot_col)
+            if self._bt_powered:
+                dot_r = max(2, TRACK_ROW_H // 8)
+                dot_x = W - BTN_MARGIN - dot_r
+                for dev in self._bt_devices:
+                    busy = self._bt_action_addr == dev["address"]
+                    col  = COL_TRACK_NUM if busy else COL_TRACK_NORMAL
+                    sl   = _render_text(self._f_track, dev["name"], col)
+                    self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                    dot_col = COL_HIGHLIGHT if dev["connected"] and not busy else COL_SEP
+                    dot_cy  = y + TRACK_ROW_H // 2
+                    pygame.gfxdraw.filled_circle(self.screen, dot_x, dot_cy, dot_r, dot_col)
+                    pygame.gfxdraw.aacircle(self.screen, dot_x, dot_cy, dot_r, dot_col)
+                    pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                    y += TRACK_ROW_H
+
+                sc = _render_text(self._f_track, "Search for new devices", COL_HIGHLIGHT)
+                self.screen.blit(sc, (BTN_MARGIN, y + (TRACK_ROW_H - sc.get_height()) // 2))
                 pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
                 y += TRACK_ROW_H
-
-            sc = _render_text(self._f_track, "Search for new devices", COL_HIGHLIGHT)
-            self.screen.blit(sc, (BTN_MARGIN, y + (TRACK_ROW_H - sc.get_height()) // 2))
-            pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
-            y += TRACK_ROW_H
 
         if self.wifi and self.wifi.available:
             sh = _render_text(self._f_track_sm, "WI-FI", COL_TEXT_ALBUM)
             self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
+            self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, self._wifi_powered)
             pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
 
@@ -1906,7 +1915,7 @@ class App:
             sig_w   = n_bars * bar_w + (n_bars - 1) * bar_gap
             lock_w  = max(10, TRACK_ROW_H // 4)
 
-            for net in self._wifi_networks:
+            for net in (self._wifi_networks if self._wifi_powered else []):
                 busy = self._wifi_action_name == net["name"]
                 col  = COL_TRACK_NUM if busy else COL_TRACK_NORMAL
                 sl   = _render_text(self._f_track, net["name"], col)
@@ -2111,6 +2120,16 @@ class App:
         sep_y = 2 * (BTN_MARGIN + BTN_RADIUS)
         return sep_y + row_index * TRACK_ROW_H - int(self._settings_scroll)
 
+    def _bt_row_count(self) -> int:
+        if not (self.bt and self.bt.available):
+            return 0
+        return (2 + len(self._bt_devices)) if self._bt_powered else 1
+
+    def _wifi_row_count(self) -> int:
+        if not (self.wifi and self.wifi.available):
+            return 0
+        return (1 + len(self._wifi_networks)) if self._wifi_powered else 1
+
     def _settings_row_hit(self, pos, row_index: int) -> bool:
         sep_y  = 2 * (BTN_MARGIN + BTN_RADIUS)
         clip_h = H - PROGRESS_H - BTN_MARGIN * 2 - sep_y
@@ -2125,7 +2144,7 @@ class App:
         return None
 
     def _bt_device_at(self, pos) -> dict | None:
-        if not (self.bt and self.bt.available and self._bt_devices):
+        if not (self.bt and self.bt.available and self._bt_devices and self._bt_powered):
             return None
         base = len(_SETTINGS_ITEMS) + 1   # +1 for BT section header
         for i, dev in enumerate(self._bt_devices):
@@ -2134,54 +2153,73 @@ class App:
         return None
 
     def _settings_scan_btn_at(self, pos) -> bool:
-        if not (self.bt and self.bt.available):
+        if not (self.bt and self.bt.available and self._bt_powered):
             return False
         row = len(_SETTINGS_ITEMS) + 1 + len(self._bt_devices)
         return self._settings_row_hit(pos, row)
 
+    def _settings_bt_power_toggle_at(self, pos) -> bool:
+        if not (self.bt and self.bt.available):
+            return False
+        row = len(_SETTINGS_ITEMS)   # BT header row index
+        ry = self._settings_row_y(row)
+        tx = W - BTN_MARGIN - TOGGLE_W
+        ty = ry + (TRACK_ROW_H - TOGGLE_H) // 2
+        return (tx <= pos[0] <= tx + TOGGLE_W
+                and ty <= pos[1] <= ty + TOGGLE_H)
+
+    def _settings_wifi_power_toggle_at(self, pos) -> bool:
+        if not (self.wifi and self.wifi.available):
+            return False
+        row = len(_SETTINGS_ITEMS) + self._bt_row_count()   # WiFi header row index
+        ry = self._settings_row_y(row)
+        tx = W - BTN_MARGIN - TOGGLE_W
+        ty = ry + (TRACK_ROW_H - TOGGLE_H) // 2
+        return (tx <= pos[0] <= tx + TOGGLE_W
+                and ty <= pos[1] <= ty + TOGGLE_H)
+
     def _wifi_network_at(self, pos) -> dict | None:
-        if not (self.wifi and self.wifi.available and self._wifi_networks):
+        if not (self.wifi and self.wifi.available and self._wifi_networks and self._wifi_powered):
             return None
-        bt_rows = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        base = len(_SETTINGS_ITEMS) + bt_rows + 1   # +1 for wifi header
+        base = len(_SETTINGS_ITEMS) + self._bt_row_count() + 1   # +1 for wifi header
         for i, net in enumerate(self._wifi_networks):
             if self._settings_row_hit(pos, base + i):
                 return net
         return None
 
     def _settings_clear_cache_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 1   # +0 = SYSTEM header
         return self._settings_row_hit(pos, row)
 
     def _settings_debug_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 2
         return self._settings_row_hit(pos, row)
 
     def _settings_calibrate_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 4   # +3 = TOUCH header
         return self._settings_row_hit(pos, row)
 
     def _settings_reset_cal_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 5
         return self._settings_row_hit(pos, row)
 
     def _settings_restart_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 7   # +6 = POWER header
         return self._settings_row_hit(pos, row)
 
     def _settings_shutdown_btn_at(self, pos) -> bool:
-        bt_rows   = (2 + len(self._bt_devices)) if (self.bt and self.bt.available) else 0
-        wifi_rows = (1 + len(self._wifi_networks)) if (self.wifi and self.wifi.available) else 0
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 8
         return self._settings_row_hit(pos, row)
 
@@ -2521,6 +2559,28 @@ class App:
             key = self._settings_item_at(pos)
             if key:
                 settings.toggle(key)
+                return
+            if self._settings_bt_power_toggle_at(pos):
+                new_val = not self._bt_powered
+                self._bt_powered = new_val
+                self._dirty = True
+                def _do_bt_power(v=new_val):
+                    self.bt.set_powered(v)
+                    self._bt_powered  = self.bt.is_powered()
+                    self._bt_devices  = self.bt.get_devices() if self._bt_powered else []
+                    self._dirty = True
+                threading.Thread(target=_do_bt_power, daemon=True).start()
+                return
+            if self._settings_wifi_power_toggle_at(pos):
+                new_val = not self._wifi_powered
+                self._wifi_powered = new_val
+                self._dirty = True
+                def _do_wifi_power(v=new_val):
+                    self.wifi.set_enabled(v)
+                    self._wifi_powered  = self.wifi.is_enabled()
+                    self._wifi_networks = self.wifi.get_networks() if self._wifi_powered else []
+                    self._dirty = True
+                threading.Thread(target=_do_wifi_power, daemon=True).start()
                 return
             dev = self._bt_device_at(pos)
             if dev and self._bt_action_addr is None:

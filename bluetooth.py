@@ -57,6 +57,19 @@ class BluetoothManager:
 
     # ── paired devices ────────────────────────────────────────────────────────
 
+    def is_powered(self) -> bool:
+        try:
+            out = _run("show")
+            return "Powered: yes" in out
+        except Exception:
+            return False
+
+    def set_powered(self, on: bool):
+        try:
+            _run("power", "on" if on else "off", timeout=6)
+        except Exception as e:
+            log.warning("set_powered %s: %s", on, e)
+
     def get_devices(self) -> list[dict]:
         """Return paired devices using D-Bus (bluetoothctl filter args not in BlueZ 5.50)."""
         if not self.available:

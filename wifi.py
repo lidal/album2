@@ -134,6 +134,23 @@ class WiFiManager:
             log.warning("WiFi connect_new %r failed: %s", ssid, e)
             return False
 
+    def is_enabled(self) -> bool:
+        """Return True if WiFi radio is not soft-blocked."""
+        try:
+            r = subprocess.run(["rfkill", "list", "wifi"],
+                               capture_output=True, text=True, timeout=3)
+            return "Soft blocked: yes" not in r.stdout
+        except Exception:
+            return True
+
+    def set_enabled(self, on: bool):
+        try:
+            cmd = "unblock" if on else "block"
+            subprocess.run(["sudo", "rfkill", cmd, "wifi"],
+                           capture_output=True, timeout=5)
+        except Exception as e:
+            log.warning("WiFi set_enabled %s: %s", on, e)
+
     def disconnect(self, name: str):
         """Disconnect current network."""
         try:
