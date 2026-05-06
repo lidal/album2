@@ -4,66 +4,87 @@ import logging
 
 log = logging.getLogger(__name__)
 
-
-def _nmcli(*args, timeout=8) -> str:
-    r = subprocess.run(
-        ["nmcli", *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    return r.stdout
+_WPA = "/usr/sbin/wpa_cli"
+_IFACE = "wlan0"
 
 
-def _nmcli_ok(*args, timeout=8) -> bool:
-    r = subprocess.run(
-        ["nmcli", *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    return r.returncode == 0
+def _cli(*args, timeout=8) -> str:
+    try:
+        r = subprocess.run(
+            ["sudo", _WPA, "-i", _IFACE, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r.stdout
+    except Exception as e:
+        raise RuntimeError(e) from e
+
+
+def _dbm_to_pct(dbm: int) -> int:
+    """Convert dBm signal level to 0-100%."""
+    return min(100, max(0, 2 * (dbm + 100)))
 
 
 class WiFiManager:
     def __init__(self):
         self.available = False
         try:
-            _nmcli("-t", "-f", "VERSION", "general")
-            self.available = True
+            out = _cli("status")
+            if "wpa_state" in out:
+                self.available = True
         except Exception as e:
             log.warning("WiFiManager unavailable: %s", e)
 
+    def _saved_networks(self) -> dict[str, int]:
+        """Returns {ssid: network_id} for all saved networks."""
+        out = _cli("list_networks")
+        saved = {}
+        for line in out.splitlines()[1:]:   # skip header
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    saved[parts[1]] = int(parts[0])
+                except ValueError:
+                    pass
+        return saved
+
+    def _connected_ssid(self) -> str:
+        """Returns the currently connected SSID or empty string."""
+        out = _cli("status")
+        for line in out.splitlines():
+            if line.startswith("ssid="):
+                state_line = [l for l in out.splitlines() if l.startswith("wpa_state=")]
+                if state_line and "COMPLETED" in state_line[0]:
+                    return line[5:]
+        return ""
+
     def get_networks(self) -> list[dict]:
-        """
-        Returns visible WiFi networks sorted by: connected first, then signal desc.
-        Each dict: {name, connected, signal, saved}
-        """
         if not self.available:
             return []
         try:
-            saved_out = _nmcli("-t", "-f", "NAME,TYPE", "connection", "show")
-            saved = set()
-            for line in saved_out.splitlines():
-                parts = line.split(":")
-                if len(parts) >= 2 and parts[1] == "802-11-wireless":
-                    saved.add(parts[0])
+            saved = self._saved_networks()
+            connected = self._connected_ssid()
 
-            wifi_out = _nmcli("-t", "-f", "SSID,SIGNAL,ACTIVE", "device", "wifi", "list")
+            _cli("scan")   # trigger scan; results from previous scan are available immediately
+            out = _cli("scan_results")
+
             seen: dict[str, dict] = {}
-            for line in wifi_out.splitlines():
-                parts = line.split(":")
-                if len(parts) < 3:
+            for line in out.splitlines()[1:]:   # skip header
+                parts = line.split("\t")
+                if len(parts) < 5:
                     continue
-                ssid, sig, active = parts[0], parts[1], parts[2]
+                ssid = parts[4].strip()
                 if not ssid:
                     continue
                 try:
-                    signal = int(sig)
+                    signal = _dbm_to_pct(int(parts[2]))
                 except ValueError:
                     signal = 0
-                connected = active.strip() == "yes"
-                if ssid not in seen or connected:
+                is_connected = ssid == connected
+                if ssid not in seen or is_connected:
                     seen[ssid] = {
                         "name":      ssid,
                         "signal":    signal,
-                        "connected": connected,
+                        "connected": is_connected,
                         "saved":     ssid in saved,
                     }
 
@@ -74,31 +95,58 @@ class WiFiManager:
             log.warning("get_networks failed: %s", e)
             return []
 
-    def connect(self, name: str):
-        """Connect to a saved network by connection name. Blocking."""
+    def connect(self, name: str) -> bool:
+        """Connect to a saved network by SSID. Blocking."""
         try:
-            _nmcli("connection", "up", name, timeout=20)
+            saved = self._saved_networks()
+            if name not in saved:
+                return False
+            net_id = saved[name]
+            _cli("select_network", str(net_id))
+            _cli("save_config")
+            # Ask dhcpcd to renew
+            subprocess.run(["sudo", "dhcpcd", "-n", _IFACE],
+                           capture_output=True, timeout=15)
+            return True
         except Exception as e:
             log.warning("WiFi connect %r failed: %s", name, e)
+            return False
 
     def connect_new(self, ssid: str, password: str) -> bool:
-        """Connect to a new (unsaved) network with a password. Blocking. Returns True on success."""
+        """Connect to a new network with a password. Blocking. Returns True on success."""
         try:
-            ok = _nmcli_ok("device", "wifi", "connect", ssid, "password", password, timeout=30)
-            if not ok:
-                # nmcli creates a connection profile even on auth failure — delete it
-                try:
-                    _nmcli("connection", "delete", ssid, timeout=5)
-                except Exception:
-                    pass
-            return ok
+            net_id_line = _cli("add_network").strip()
+            net_id = int(net_id_line)
+            _cli("set_network", str(net_id), "ssid", f'"{ssid}"')
+            _cli("set_network", str(net_id), "psk",  f'"{password}"')
+            _cli("enable_network", str(net_id))
+            import time; time.sleep(5)   # give supplicant time to associate
+            connected = self._connected_ssid() == ssid
+            if connected:
+                _cli("save_config")
+                subprocess.run(["sudo", "dhcpcd", "-n", _IFACE],
+                               capture_output=True, timeout=15)
+            else:
+                _cli("remove_network", str(net_id))
+                _cli("save_config")
+            return connected
         except Exception as e:
             log.warning("WiFi connect_new %r failed: %s", ssid, e)
             return False
 
     def disconnect(self, name: str):
-        """Disconnect a network by connection name. Blocking."""
+        """Disconnect current network."""
         try:
-            _nmcli("connection", "down", name, timeout=10)
+            _cli("disconnect")
         except Exception as e:
             log.warning("WiFi disconnect %r failed: %s", name, e)
+
+    def forget(self, name: str):
+        """Remove a saved network by SSID."""
+        try:
+            saved = self._saved_networks()
+            if name in saved:
+                _cli("remove_network", str(saved[name]))
+                _cli("save_config")
+        except Exception as e:
+            log.warning("WiFi forget %r failed: %s", name, e)

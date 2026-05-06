@@ -2385,9 +2385,7 @@ class App:
             self._dirty      = True
         elif action == "forget":
             def _do(n=name):
-                import subprocess
-                subprocess.run(["nmcli", "connection", "delete", n],
-                               capture_output=True, timeout=8)
+                self.wifi.forget(n)
                 self._wifi_networks = self.wifi.get_networks()
                 self._dirty = True
             threading.Thread(target=_do, daemon=True).start()
