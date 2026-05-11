@@ -212,14 +212,18 @@ class View(IntEnum):
 
 
 _SETTINGS_ITEMS = [
-    (None,          "PLAYBACK"),
-    ("autoplay",    "Autoplay when opening album"),
-    ("lyrics",      "Show lyrics"),
-    (None,          "GRID"),
-    ("grid_labels", "Show album & artist names"),
-    (None,          "PERFORMANCE"),
-    ("idle_fps",    "Reduce FPS when idle"),
-    ("skip_draw",   "Skip redraw when nothing changed"),
+    # (key, label)            → boolean toggle  (key=None → section header)
+    # (key, label, options)   → dropdown (tap to cycle)
+    (None,             "LIBRARY"),
+    ("library_source", "Music source", ["Local", "Spotify"]),
+    (None,             "PLAYBACK"),
+    ("autoplay",       "Autoplay when opening album"),
+    ("lyrics",         "Show lyrics"),
+    (None,             "GRID"),
+    ("grid_labels",    "Show album & artist names"),
+    (None,             "PERFORMANCE"),
+    ("idle_fps",       "Reduce FPS when idle"),
+    ("skip_draw",      "Skip redraw when nothing changed"),
 ]
 
 # Keyboard rows: list of (label, weight).  Special labels: SHIFT BACK OK SPACE SYM ABC
@@ -256,13 +260,14 @@ _KB_SPECIAL = frozenset(_KB_FACE)
 class App:
 # ══════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, screen: pygame.Surface, player, volume_ctrl, bt=None, wifi=None, audio=None):
-        self.screen = screen
-        self.player = player
-        self.vc     = volume_ctrl
-        self.bt     = bt
-        self.wifi   = wifi
-        self.audio  = audio
+    def __init__(self, screen: pygame.Surface, player, volume_ctrl, bt=None, wifi=None, audio=None, spotify=None):
+        self.screen  = screen
+        self.player  = player
+        self.vc      = volume_ctrl
+        self.bt      = bt
+        self.wifi    = wifi
+        self.audio   = audio
+        self.spotify = spotify
 
         # fonts
         self._f_title    = _font(FONT_SZ_TITLE)
@@ -375,6 +380,11 @@ class App:
         self._scan_action_addr: str | None = None
         self._scan_last_refresh: int = 0
         self._scan_refreshing: bool = False
+
+        # Spotify auth overlay state
+        self._sp_auth_url:     str  = ""    # non-empty → show auth overlay
+        self._sp_auth_waiting: bool = False  # waiting for callback server
+        self._sp_kb_field:     str  = ""    # "spotify_client_id" | "spotify_client_secret" | ""
 
         # scroll offsets
         self._grid_scroll:     float = 0.0
@@ -501,12 +511,24 @@ class App:
     # ── album list + thumbnails ───────────────────────────────────────────────
 
     def _load_albums(self):
-        self._albums          = self.player.get_albums()
+        src = settings.get("library_source") or "Local"
+        if src == "Spotify" and self.spotify and self.spotify.is_authenticated():
+            self._albums = self.spotify.get_saved_albums()
+        else:
+            self._albums = self.player.get_albums()
         self._thumbs_pending  = len(self._albums)
         self._dirty           = True
-        log.info("Loaded %d albums", len(self._albums))
+        log.info("Loaded %d albums (source=%s)", len(self._albums), src)
         for i in range(len(self._albums)):
             self._queue_thumb(i)
+
+    def _reload_albums(self):
+        """Clear album list and reload from the current source (call after source change)."""
+        self._albums = []
+        self._thumb_queued.clear()
+        self._thumbs_pending = 0
+        self._dirty = True
+        threading.Thread(target=self._load_albums, daemon=True).start()
 
     def _queue_thumb(self, idx: int):
         if idx in self._thumb_queued:
@@ -521,7 +543,9 @@ class App:
     def _fetch_thumb(self, idx: int):
         album     = self._albums[idx]
         uri       = album["track_uri"]
-        key       = hashlib.md5(uri.encode()).hexdigest()
+        # Spotify albums: use the CDN URL as cache key so local and Spotify don't collide
+        cache_key = album.get("_thumb_url") or uri
+        key       = hashlib.md5(cache_key.encode()).hexdigest()
         thumb_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{_CELL_W}.jpg")
         full_png  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
         full_jpg  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")  # legacy
@@ -537,7 +561,10 @@ class App:
                 elif os.path.exists(full_jpg):
                     full = Image.open(full_jpg).convert("RGB")
                 else:
-                    raw = self.player.get_album_art(uri)
+                    if album.get("_spotify") and self.spotify:
+                        raw = self.spotify.fetch_art(album)
+                    else:
+                        raw = self.player.get_album_art(uri)
                     if raw:
                         w, h = raw.size
                         side = min(w, h)
@@ -596,7 +623,13 @@ class App:
                 elif os.path.exists(path_jpg):
                     img = Image.open(path_jpg).convert("RGB")
                 else:
-                    img = self.player.get_album_art(uri)
+                    album_for_uri = next(
+                        (a for a in self._albums if a.get("track_uri") == uri), None
+                    )
+                    if album_for_uri and album_for_uri.get("_spotify") and self.spotify:
+                        img = self.spotify.fetch_art(album_for_uri)
+                    else:
+                        img = self.player.get_album_art(uri)
                     if img:
                         dw, dh = img.size
                         side   = min(dw, dh)
@@ -838,6 +871,7 @@ class App:
                 or abs(self._tl_vel) > 0.5
                 or abs(self._settings_vel) > 0.5
                 or self._view == View.SCAN   # animated dots
+                or bool(self._sp_auth_url)   # animated waiting dots
                 or self._thumbs_pending > 0
             )
 
@@ -934,6 +968,13 @@ class App:
         self.screen.fill(COL_GRID_BG)
 
         grid_top = 0
+
+        src = settings.get("library_source") or "Local"
+        if src == "Spotify" and self.spotify and not self.spotify.is_authenticated():
+            hint = _render_text(self._f_artist, "Go to Settings → Authorize Spotify", COL_TEXT_ALBUM)
+            self.screen.blit(hint, ((W - hint.get_width()) // 2,
+                                     grid_top + (H - grid_top) // 2))
+            return
 
         if not self._albums or self._thumbs_pending > 0:
             loaded = len(self._albums) - self._thumbs_pending
@@ -1277,13 +1318,22 @@ class App:
         self._tl_scroll = 0.0
 
         # Immediately show album-level info (title will refine once tracks load)
-        self.player.set_song_optimistic({
-            "title":  "",
-            "artist": album["artist"],
-            "album":  album["name"],
-            "file":   album["track_uri"],
-        })
-        self._song = self.player.get_current_song()
+        if not album.get("_spotify"):
+            self.player.set_song_optimistic({
+                "title":  "",
+                "artist": album["artist"],
+                "album":  album["name"],
+                "file":   album["track_uri"],
+            })
+            self._song = self.player.get_current_song()
+        else:
+            # Optimistic display without touching the MPD player
+            self._song = {
+                "title":  "",
+                "artist": album["artist"],
+                "album":  album["name"],
+                "file":   album["track_uri"],
+            }
 
         # start art loading immediately from cached track_uri
         uri = album["track_uri"]
@@ -1292,31 +1342,46 @@ class App:
             self._art_album_uri = uri
             self._load_art(uri)
 
-        # load tracks + pause at track 0 in background
+        # load tracks + queue/play in background
         def _load():
-            tracks = self.player.get_album_tracks(album)
+            if album.get("_spotify") and self.spotify:
+                tracks = self.spotify.get_album_tracks(album)
+            else:
+                tracks = self.player.get_album_tracks(album)
             album["tracks"] = tracks
             self._tracks = tracks
             if tracks:
                 t0 = tracks[0]
-                # Set title as soon as we know the first track — before load_album
-                # so controls overlay shows it immediately
-                self.player.set_song_optimistic({
-                    "title":  t0.get("title", ""),
-                    "artist": t0.get("artist") or t0.get("albumartist", album["artist"]),
-                    "album":  t0.get("album", album["name"]),
-                    "file":   t0.get("file", ""),
-                })
-                if settings.get("autoplay"):
-                    self.player.play_album(tracks, 0)
+                if album.get("_spotify"):
+                    self._song = {
+                        "title":  t0.get("title", ""),
+                        "artist": t0.get("artist", album["artist"]),
+                        "album":  album["name"],
+                        "file":   t0.get("file", ""),
+                    }
+                    if settings.get("autoplay") and self.spotify:
+                        self.spotify.play_album(album, 0)
                 else:
-                    self.player.load_album(tracks, 0)
+                    self.player.set_song_optimistic({
+                        "title":  t0.get("title", ""),
+                        "artist": t0.get("artist") or t0.get("albumartist", album["artist"]),
+                        "album":  t0.get("album", album["name"]),
+                        "file":   t0.get("file", ""),
+                    })
+                    if settings.get("autoplay"):
+                        self.player.play_album(tracks, 0)
+                    else:
+                        self.player.load_album(tracks, 0)
+            self._dirty = True
 
         threading.Thread(target=_load, daemon=True).start()
 
     def _go_grid(self):
         self._peeking  = False
-        self.player.stop()
+        cur = (self._albums[self._cur_idx] if self._cur_idx is not None
+               and self._cur_idx < len(self._albums) else None)
+        if not (cur and cur.get("_spotify")):
+            self.player.stop()
         self._cur_idx  = None
         self._tracks   = []
         self._art           = None
@@ -1684,6 +1749,10 @@ class App:
         Add new hit-test methods here and the debug overlay picks them up automatically."""
         return bool(
             self._settings_item_at(pos)
+            or self._spotify_client_id_row_at(pos)
+            or self._spotify_client_secret_row_at(pos)
+            or self._spotify_authorize_row_at(pos)
+            or self._spotify_disconnect_row_at(pos)
             or self._bt_device_at(pos)
             or self._settings_scan_btn_at(pos)
             or self._wifi_network_at(pos)
@@ -1915,9 +1984,10 @@ class App:
         pygame.draw.line(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
 
         # compute total content height from row count (independent of scroll)
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9   # SYSTEM(hdr+cache+debug) + TOUCH(hdr+cal+reset) + POWER(hdr+restart+shutdown)
+        total_rows = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 9
         content_h  = total_rows * TRACK_ROW_H + BTN_MARGIN * 2
         max_scroll  = max(0.0, float(content_h - clip_h))
         self._settings_scroll = max(0.0, min(self._settings_scroll, max_scroll))
@@ -1928,11 +1998,25 @@ class App:
         self.screen.set_clip(0, clip_y, W, H - clip_y)   # clip top only, open bottom
 
         y = clip_y - scroll   # content origin, offset by scroll
-        for key, label in _SETTINGS_ITEMS:
+        for item in _SETTINGS_ITEMS:
+            key     = item[0]
+            label   = item[1]
+            options = item[2] if len(item) > 2 else None
             if key is None:
                 # section header
                 sh = _render_text(self._f_track_sm, label, COL_TEXT_ALBUM)
                 self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
+            elif options is not None:
+                # dropdown: show current value + chevron
+                val   = settings.get(key) or options[0]
+                sl    = _render_text(self._f_track, label, COL_TRACK_NORMAL)
+                vs    = _render_text(self._f_track, val, COL_HIGHLIGHT)
+                chev  = _render_text(self._f_track, "▾", COL_TEXT_ALBUM)
+                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                cx = W - BTN_MARGIN - chev.get_width()
+                vx = cx - vs.get_width() - 6
+                self.screen.blit(vs,   (vx, y + (TRACK_ROW_H - vs.get_height()) // 2))
+                self.screen.blit(chev, (cx, y + (TRACK_ROW_H - chev.get_height()) // 2))
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
@@ -1940,6 +2024,53 @@ class App:
             pygame.draw.line(self.screen, COL_SEP,
                                (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
+
+        # ── SPOTIFY config (shown when source = Spotify) ──────────────────────
+        if sp_rows:
+            sh = _render_text(self._f_track_sm, "SPOTIFY", COL_TEXT_ALBUM)
+            self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
+            pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+            y += TRACK_ROW_H
+
+            for field_key, field_label in (
+                ("spotify_client_id",     "Client ID"),
+                ("spotify_client_secret", "Client Secret"),
+            ):
+                val = settings.get(field_key) or ""
+                disp = ("•" * min(len(val), 12)) if field_key == "spotify_client_secret" and val else (val[:20] + "…" if len(val) > 20 else val) or "—"
+                sl  = _render_text(self._f_track, field_label, COL_TRACK_NORMAL)
+                vs  = _render_text(self._f_track_sm, disp, COL_TEXT_ALBUM)
+                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                self.screen.blit(vs, (W - BTN_MARGIN - vs.get_width(), y + (TRACK_ROW_H - vs.get_height()) // 2))
+                pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                y += TRACK_ROW_H
+
+            # Authorize / status row
+            sp_ok = self.spotify and self.spotify.is_authenticated()
+            has_creds = bool(settings.get("spotify_client_id"))
+            if sp_ok:
+                auth_s = _render_text(self._f_track, "Connected ✓", (100, 200, 100))
+            elif self._sp_auth_waiting:
+                auth_s = _render_text(self._f_track, "Waiting for browser…", COL_TEXT_ALBUM)
+            elif has_creds:
+                auth_s = _render_text(self._f_track, "Authorize Spotify", COL_HIGHLIGHT)
+            else:
+                auth_s = _render_text(self._f_track, "Enter credentials above", COL_TEXT_ALBUM)
+            self.screen.blit(auth_s, (BTN_MARGIN, y + (TRACK_ROW_H - auth_s.get_height()) // 2))
+            pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+            y += TRACK_ROW_H
+
+            if sp_ok:
+                disc_s = _render_text(self._f_track, "Disconnect", (200, 100, 100))
+                self.screen.blit(disc_s, (BTN_MARGIN, y + (TRACK_ROW_H - disc_s.get_height()) // 2))
+                pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                y += TRACK_ROW_H
+
+        # ── Spotify auth URL overlay ──────────────────────────────────────────
+        if self._sp_auth_url:
+            self.screen.set_clip(old_clip)
+            self._draw_spotify_auth_overlay()
+            old_clip = self.screen.get_clip()  # overlay may have changed clip
 
         if self.bt and self.bt.available:
             sh = _render_text(self._f_track_sm, "BLUETOOTH", COL_TEXT_ALBUM)
@@ -2188,6 +2319,13 @@ class App:
         sep_y = 2 * (BTN_MARGIN + BTN_RADIUS)
         return sep_y + row_index * TRACK_ROW_H - int(self._settings_scroll)
 
+    def _spotify_row_count(self) -> int:
+        if settings.get("library_source") != "Spotify":
+            return 0
+        # header + client_id + client_secret + authorize + (disconnect if connected)
+        sp_ok = self.spotify and self.spotify.is_authenticated()
+        return 4 + (1 if sp_ok else 0)
+
     def _bt_row_count(self) -> int:
         if not (self.bt and self.bt.available):
             return 0
@@ -2206,15 +2344,44 @@ class App:
                 and sep_y <= pos[1] < sep_y + clip_h)
 
     def _settings_item_at(self, pos) -> str | None:
-        for i, (key, _) in enumerate(_SETTINGS_ITEMS):
+        for i, item in enumerate(_SETTINGS_ITEMS):
+            key = item[0]
             if key is not None and self._settings_row_hit(pos, i):
                 return key
         return None
 
+    # ── Spotify credential / auth row hit-tests ───────────────────────────────
+
+    def _spotify_base_row(self) -> int:
+        return len(_SETTINGS_ITEMS)   # first Spotify row index
+
+    def _spotify_client_id_row_at(self, pos) -> bool:
+        if self._spotify_row_count() == 0:
+            return False
+        return self._settings_row_hit(pos, self._spotify_base_row() + 1)  # +0=header
+
+    def _spotify_client_secret_row_at(self, pos) -> bool:
+        if self._spotify_row_count() == 0:
+            return False
+        return self._settings_row_hit(pos, self._spotify_base_row() + 2)
+
+    def _spotify_authorize_row_at(self, pos) -> bool:
+        if self._spotify_row_count() == 0:
+            return False
+        return self._settings_row_hit(pos, self._spotify_base_row() + 3)
+
+    def _spotify_disconnect_row_at(self, pos) -> bool:
+        if not (self.spotify and self.spotify.is_authenticated()):
+            return False
+        return self._settings_row_hit(pos, self._spotify_base_row() + 4)
+
+    # ── BT / WiFi / System row hit-tests ─────────────────────────────────────
+
     def _bt_device_at(self, pos) -> dict | None:
         if not (self.bt and self.bt.available and self._bt_devices and self._bt_powered):
             return None
-        base = len(_SETTINGS_ITEMS) + 1   # +1 for BT section header
+        sp_rows = self._spotify_row_count()
+        base = len(_SETTINGS_ITEMS) + sp_rows + 1   # +1 for BT section header
         for i, dev in enumerate(self._bt_devices):
             if self._settings_row_hit(pos, base + i):
                 return dev
@@ -2223,13 +2390,15 @@ class App:
     def _settings_scan_btn_at(self, pos) -> bool:
         if not (self.bt and self.bt.available and self._bt_powered):
             return False
-        row = len(_SETTINGS_ITEMS) + 1 + len(self._bt_devices)
+        sp_rows = self._spotify_row_count()
+        row = len(_SETTINGS_ITEMS) + sp_rows + 1 + len(self._bt_devices)
         return self._settings_row_hit(pos, row)
 
     def _settings_bt_power_toggle_at(self, pos) -> bool:
         if not (self.bt and self.bt.available):
             return False
-        row = len(_SETTINGS_ITEMS)   # BT header row index
+        sp_rows = self._spotify_row_count()
+        row = len(_SETTINGS_ITEMS) + sp_rows   # BT header row index
         ry = self._settings_row_y(row)
         tx = W - BTN_MARGIN - TOGGLE_W
         ty = ry + (TRACK_ROW_H - TOGGLE_H) // 2
@@ -2239,7 +2408,8 @@ class App:
     def _settings_wifi_power_toggle_at(self, pos) -> bool:
         if not (self.wifi and self.wifi.available):
             return False
-        row = len(_SETTINGS_ITEMS) + self._bt_row_count()   # WiFi header row index
+        sp_rows = self._spotify_row_count()
+        row = len(_SETTINGS_ITEMS) + sp_rows + self._bt_row_count()
         ry = self._settings_row_y(row)
         tx = W - BTN_MARGIN - TOGGLE_W
         ty = ry + (TRACK_ROW_H - TOGGLE_H) // 2
@@ -2249,46 +2419,53 @@ class App:
     def _wifi_network_at(self, pos) -> dict | None:
         if not (self.wifi and self.wifi.available and self._wifi_networks and self._wifi_powered):
             return None
-        base = len(_SETTINGS_ITEMS) + self._bt_row_count() + 1   # +1 for wifi header
+        sp_rows = self._spotify_row_count()
+        base = len(_SETTINGS_ITEMS) + sp_rows + self._bt_row_count() + 1
         for i, net in enumerate(self._wifi_networks):
             if self._settings_row_hit(pos, base + i):
                 return net
         return None
 
     def _settings_clear_cache_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 1   # +0 = SYSTEM header
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 1
         return self._settings_row_hit(pos, row)
 
     def _settings_debug_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 2
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 2
         return self._settings_row_hit(pos, row)
 
     def _settings_calibrate_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 4   # +3 = TOUCH header
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 4
         return self._settings_row_hit(pos, row)
 
     def _settings_reset_cal_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 5
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 5
         return self._settings_row_hit(pos, row)
 
     def _settings_restart_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 7   # +6 = POWER header
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 7
         return self._settings_row_hit(pos, row)
 
     def _settings_shutdown_btn_at(self, pos) -> bool:
+        sp_rows   = self._spotify_row_count()
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 8
+        row = len(_SETTINGS_ITEMS) + sp_rows + bt_rows + wifi_rows + 8
         return self._settings_row_hit(pos, row)
 
     def _scan_device_at(self, pos) -> dict | None:
@@ -2668,7 +2845,57 @@ class App:
                 return
             key = self._settings_item_at(pos)
             if key:
-                settings.toggle(key)
+                item = next((it for it in _SETTINGS_ITEMS if it[0] == key), None)
+                if item and len(item) > 2 and item[2] is not None:
+                    # dropdown: cycle to next value
+                    options = item[2]
+                    cur = settings.get(key) or options[0]
+                    nxt = options[(options.index(cur) + 1) % len(options)] if cur in options else options[0]
+                    settings.set(key, nxt)
+                    if key == "library_source":
+                        self._reload_albums()
+                else:
+                    settings.toggle(key)
+                self._dirty = True
+                return
+            # ── Spotify credential / auth rows ────────────────────────────────
+            if self._spotify_client_id_row_at(pos):
+                self._sp_kb_field = "spotify_client_id"
+                self._kb_ssid = "Spotify Client ID"
+                self._kb_text = settings.get("spotify_client_id") or ""
+                self._kb_page = "alpha"
+                self._kb_shift = False
+                self._dirty = True
+                return
+            if self._spotify_client_secret_row_at(pos):
+                self._sp_kb_field = "spotify_client_secret"
+                self._kb_ssid = "Spotify Client Secret"
+                self._kb_text = settings.get("spotify_client_secret") or ""
+                self._kb_page = "alpha"
+                self._kb_shift = False
+                self._dirty = True
+                return
+            if self._spotify_authorize_row_at(pos):
+                sp_ok = self.spotify and self.spotify.is_authenticated()
+                has_creds = bool(settings.get("spotify_client_id"))
+                if not sp_ok and has_creds and self.spotify and not self._sp_auth_waiting:
+                    self._sp_auth_url     = self.spotify.get_auth_url()
+                    self._sp_auth_waiting = True
+                    self._dirty = True
+                    def _wait():
+                        ok = self.spotify.wait_for_auth(300.0)
+                        self._sp_auth_url     = ""
+                        self._sp_auth_waiting = False
+                        if ok:
+                            self._reload_albums()
+                        self._dirty = True
+                    threading.Thread(target=_wait, daemon=True).start()
+                return
+            if self._spotify_disconnect_row_at(pos):
+                if self.spotify:
+                    self.spotify.disconnect()
+                    self._reload_albums()
+                    self._dirty = True
                 return
             if self._settings_bt_power_toggle_at(pos):
                 new_val = not self._bt_powered
@@ -2844,14 +3071,25 @@ class App:
                     return
                 zone = self._ctrl_zone(pos)
                 if zone == "prev":
-                    self.player.previous(); self._reset_elapsed()
+                    if self._cur_album_spotify():
+                        if self.spotify: self.spotify.previous_track()
+                    else:
+                        self.player.previous()
+                    self._reset_elapsed()
                 elif zone == "next":
-                    self.player.next(); self._reset_elapsed()
+                    if self._cur_album_spotify():
+                        if self.spotify: self.spotify.next_track()
+                    else:
+                        self.player.next()
+                    self._reset_elapsed()
                 elif zone == "play":
                     playing = self._status.get("state") == "play"
                     self._status["state"] = "pause" if playing else "play"
                     self._dirty = True
-                    self.player.toggle()
+                    if self._cur_album_spotify():
+                        if self.spotify: self.spotify.toggle()
+                    else:
+                        self.player.toggle()
                 else:
                     self._hide_controls()
             else:
@@ -2864,17 +3102,71 @@ class App:
                 idx = self._track_at(pos)
                 if idx is not None and idx < len(self._tracks):
                     track = self._tracks[idx]
-                    self.player.play_track_in_queue(idx, track)
-                    self._reset_elapsed()
-                    self._song = self.player.get_current_song()
+                    if self._cur_album_spotify():
+                        album = self._albums[self._cur_idx] if self._cur_idx is not None else None
+                        if album and self.spotify:
+                            self.spotify.play_album(album, idx)
+                            self._status["state"] = "play"
+                            self._song = {
+                                "title":  track.get("title", ""),
+                                "artist": track.get("artist", ""),
+                                "album":  track.get("album", ""),
+                                "file":   track.get("file", ""),
+                            }
+                    else:
+                        self.player.play_track_in_queue(idx, track)
+                        self._reset_elapsed()
+                        self._song = self.player.get_current_song()
 
     def _exec_double_tap(self):
         if self._view in (View.ALBUM, View.TRACKLIST):
             playing = self._status.get("state") == "play"
             self._status["state"] = "pause" if playing else "play"
             self._dirty = True
-            self.player.toggle()
+            if self._cur_album_spotify():
+                if self.spotify: self.spotify.toggle()
+            else:
+                self.player.toggle()
             self._show_flash("pause" if playing else "play")
+
+    def _cur_album_spotify(self) -> bool:
+        """True when the currently open album is from Spotify."""
+        if self._cur_idx is None or self._cur_idx >= len(self._albums):
+            return False
+        return bool(self._albums[self._cur_idx].get("_spotify"))
+
+    def _draw_spotify_auth_overlay(self):
+        """Semi-transparent modal showing the Spotify authorization URL."""
+        pad = BTN_MARGIN * 2
+        ow  = W - pad * 2
+        oh  = H // 2
+        ox  = pad
+        oy  = (H - oh) // 2
+        overlay = pygame.Surface((ow, oh), pygame.SRCALPHA)
+        overlay.fill((20, 20, 30, 230))
+        self.screen.blit(overlay, (ox, oy))
+        pygame.draw.rect(self.screen, COL_SEP, (ox, oy, ow, oh), 1)
+
+        title = _render_text(self._f_track, "Authorize Spotify", COL_TEXT_TITLE)
+        self.screen.blit(title, (ox + (ow - title.get_width()) // 2, oy + pad // 2))
+
+        instr = _render_text(self._f_track_sm, "Open this URL in your browser:", COL_TEXT_ALBUM)
+        self.screen.blit(instr, (ox + BTN_MARGIN, oy + pad // 2 + title.get_height() + 8))
+
+        # Break URL into two lines so it fits
+        url = self._sp_auth_url
+        mid = len(url) // 2
+        cut = url.rfind("&", 0, mid + 20)
+        if cut < 0:
+            cut = mid
+        for li, part in enumerate((url[:cut], url[cut:])):
+            us = _render_text(self._f_track_sm, part, COL_HIGHLIGHT)
+            self.screen.blit(us, (ox + BTN_MARGIN,
+                                  oy + oh // 2 - us.get_height() + li * (us.get_height() + 4)))
+
+        dots = "." * (1 + (pygame.time.get_ticks() // 500) % 3)
+        wait = _render_text(self._f_track_sm, f"Waiting for callback{dots}", COL_TEXT_ALBUM)
+        self.screen.blit(wait, (ox + (ow - wait.get_width()) // 2, oy + oh - pad))
 
     def _show_controls(self):
         self._ctrl_a = 255.0; self._ctrl_a_t = 255.0
@@ -3076,7 +3368,19 @@ class App:
             self._kb_ssid  = None
             self._kb_text  = ""
             self._kb_error = False
-            if ssid and self.wifi:
+            if self._sp_kb_field:
+                # Saving a Spotify credential field
+                field = self._sp_kb_field
+                self._sp_kb_field = ""
+                settings.set(field, pw)
+                # Reconfigure SpotifyBrowser with updated credentials
+                if self.spotify:
+                    self.spotify.configure(
+                        settings.get("spotify_client_id") or "",
+                        settings.get("spotify_client_secret") or "",
+                    )
+                self._dirty = True
+            elif ssid and self.wifi:
                 self._wifi_action_name = ssid
                 def _connect(s=ssid, p=pw):
                     ok = self.wifi.connect_new(s, p)

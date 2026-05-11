@@ -15,6 +15,7 @@ from display   import AlbumDisplay
 from bluetooth import BluetoothManager
 from wifi      import WiFiManager
 from audio     import AudioOutputManager
+from spotify   import SpotifyBrowser
 import settings; settings.load()
 
 logging.basicConfig(
@@ -23,7 +24,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("album2")
 
-_BARE_METAL = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+_BARE_METAL  = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+_READY_FLAG  = "/tmp/album2.ready"
+
+
+def _signal_ready():
+    """Tell bootscreen.py to exit by creating the ready flag."""
+    try:
+        open(_READY_FLAG, "w").close()
+    except Exception:
+        pass
 
 
 def _init_display() -> pygame.Surface:
@@ -83,18 +93,25 @@ def main():
             touch = EvdevTouch("/dev/input/event0", SCREEN_WIDTH, SCREEN_HEIGHT)
         except Exception as exc:
             log.warning("Cannot open touch device: %s", exc)
-        try:
-            import subprocess
-            subprocess.run(["plymouth", "quit"])
-        except Exception as exc:
-            log.warning("Cannot close plymouth", exc)
 
     player  = MopidyPlayer()
     volume  = VolumeSimulator() if VOLUME_SIMULATE else VolumeController()
     bt      = BluetoothManager()
     wifi    = WiFiManager()
     audio   = AudioOutputManager(player._vol_backend)
-    display = AlbumDisplay(screen, player, volume, bt, wifi, audio)
+    spotify = SpotifyBrowser()
+    spotify.configure(
+        settings.get("spotify_client_id") or "",
+        settings.get("spotify_client_secret") or "",
+    )
+    display = AlbumDisplay(screen, player, volume, bt, wifi, audio, spotify=spotify)
+
+    # Everything is ready — tell bootscreen to exit and draw the first frame
+    # before bootscreen clears the display.
+    display.draw()
+    if fb:
+        fb.flip(screen)
+    _signal_ready()
 
     clock   = pygame.time.Clock()
     running = True
@@ -116,10 +133,14 @@ def main():
                 fb.flip(screen)
             else:
                 pygame.display.flip()
-        # When nothing changed, cap at 15 fps to avoid burning a core on busy-wait.
-        clock.tick(fps if drew else min(fps, 15))
+        # When nothing changed, cap at 10 fps to avoid burning a core on busy-wait.
+        clock.tick(fps if drew else min(fps, 10))
 
     log.info("Shutting down")
+    try:
+        os.remove(_READY_FLAG)
+    except FileNotFoundError:
+        pass
     player.disconnect()
     if fb:
         fb.close()
