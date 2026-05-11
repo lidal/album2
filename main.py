@@ -83,6 +83,11 @@ def main():
             touch = EvdevTouch("/dev/input/event0", SCREEN_WIDTH, SCREEN_HEIGHT)
         except Exception as exc:
             log.warning("Cannot open touch device: %s", exc)
+        try:
+            import subprocess
+            subprocess.run(["plymouth", "quit"])
+        except Exception as exc:
+            log.warning("Cannot close plymouth", exc)
 
     player  = MopidyPlayer()
     volume  = VolumeSimulator() if VOLUME_SIMULATE else VolumeController()
