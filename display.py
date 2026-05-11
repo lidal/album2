@@ -502,9 +502,11 @@ class App:
 
     def _load_albums(self):
         self._albums          = self.player.get_albums()
-        self._thumbs_pending  = 0
+        self._thumbs_pending  = len(self._albums)
         self._dirty           = True
         log.info("Loaded %d albums", len(self._albums))
+        for i in range(len(self._albums)):
+            self._queue_thumb(i)
 
     def _queue_thumb(self, idx: int):
         if idx in self._thumb_queued:
@@ -1051,51 +1053,65 @@ class App:
         _draw_triangle(self.screen, col, W // 6 - off, ctrl_cy, CTRL_ICON_SM, "left")
         _draw_triangle(self.screen, col, W // 6 + off, ctrl_cy, CTRL_ICON_SM, "left")
 
-        if playing:
-            _draw_pause(self.screen, big, W // 2, ctrl_cy, CTRL_ICON_LG)
-        else:
-            _draw_play(self.screen, big, W // 2, ctrl_cy, CTRL_ICON_LG)
-
-        _draw_triangle(self.screen, col, 5 * W // 6 - off, ctrl_cy, CTRL_ICON_SM, "right")
-        _draw_triangle(self.screen, col, 5 * W // 6 + off, ctrl_cy, CTRL_ICON_SM, "right")
-
         accent   = tuple(int(c) for c in self._accent_cur)
         icon_col = _on_bg(accent, strong=True)
+        pressed  = self._pressed_ctrl()
 
-        # gear (settings) button — left of close button
+        def _btn(col):
+            """Return lightened colour when this button is pressed."""
+            return tuple(min(255, c + 55) for c in col[:3]) if True else col
+
+        def _circle(x, y, r, name, base_col):
+            c = tuple(min(255, v + 55) for v in base_col[:3]) if pressed == name else base_col
+            pygame.gfxdraw.filled_circle(self.screen, x, y, r, c)
+            pygame.gfxdraw.aacircle(self.screen, x, y, r, c)
+
+        # play/pause
+        _circle(W // 2, ctrl_cy, CTRL_ICON_LG, "play", accent)
+        play_icon_col = _on_bg(accent, strong=True)
+        if playing:
+            _draw_pause(self.screen, play_icon_col, W // 2, ctrl_cy, CTRL_ICON_LG)
+        else:
+            _draw_play(self.screen, play_icon_col, W // 2, ctrl_cy, CTRL_ICON_LG)
+
+        # prev/next triangles — highlight with brighter col when pressed
+        tri_col     = tuple(min(255, c + 55) for c in col) if pressed == "prev" else col
+        tri_col_nxt = tuple(min(255, c + 55) for c in col) if pressed == "next" else col
+        _draw_triangle(self.screen, tri_col,     W // 6 - off, ctrl_cy, CTRL_ICON_SM, "left")
+        _draw_triangle(self.screen, tri_col,     W // 6 + off, ctrl_cy, CTRL_ICON_SM, "left")
+        _draw_triangle(self.screen, tri_col_nxt, 5 * W // 6 - off, ctrl_cy, CTRL_ICON_SM, "right")
+        _draw_triangle(self.screen, tri_col_nxt, 5 * W // 6 + off, ctrl_cy, CTRL_ICON_SM, "right")
+
+        # gear button
         gx = W - BTN_RADIUS - BTN_MARGIN - 2 * BTN_RADIUS - BTN_GAP
         gy = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, gx, gy, BTN_RADIUS, accent)
-        pygame.gfxdraw.aacircle(self.screen, gx, gy, BTN_RADIUS, accent)
+        _circle(gx, gy, BTN_RADIUS, "gear", accent)
         self._draw_gear_icon(gx, gy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=icon_col, hole_col=accent)
 
-        # close button (top-right) — hides controls only
+        # close button
         bx = W - BTN_RADIUS - BTN_MARGIN
         by = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, bx, by, BTN_RADIUS, accent)
-        pygame.gfxdraw.aacircle(self.screen, bx, by, BTN_RADIUS, accent)
+        _circle(bx, by, BTN_RADIUS, "close", accent)
         d = max(1, BTN_RADIUS * 11 // 32)
         pygame.draw.aaline(self.screen, icon_col, (bx - d, by - d), (bx + d, by + d))
         pygame.draw.aaline(self.screen, icon_col, (bx - d + 1, by - d), (bx + d + 1, by + d))
         pygame.draw.aaline(self.screen, icon_col, (bx + d, by - d), (bx - d, by + d))
         pygame.draw.aaline(self.screen, icon_col, (bx + d + 1, by - d), (bx - d + 1, by + d))
 
-        # stop button (top-left) — stops playback and returns to grid
+        # stop button
         sx = BTN_RADIUS + BTN_MARGIN
         sy = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, sx, sy, BTN_RADIUS, accent)
-        pygame.gfxdraw.aacircle(self.screen, sx, sy, BTN_RADIUS, accent)
+        _circle(sx, sy, BTN_RADIUS, "stop", accent)
         sq = max(1, BTN_RADIUS * 13 // 32)
         pygame.draw.rect(self.screen, icon_col, (sx - sq, sy - sq, sq * 2, sq * 2))
 
-        # speaker button — right of stop button
+        # speaker button
         if self.audio and self.audio.available:
             spx = sx + 2 * BTN_RADIUS + BTN_GAP
             spy = sy
-            bg  = accent if self._audio_popup_open else (55, 55, 65)
-            pygame.gfxdraw.filled_circle(self.screen, spx, spy, BTN_RADIUS, bg)
-            pygame.gfxdraw.aacircle(self.screen, spx, spy, BTN_RADIUS, bg)
-            self._draw_speaker_icon(spx, spy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=_on_bg(bg, strong=True))
+            spk_base = accent if self._audio_popup_open else (55, 55, 65)
+            _circle(spx, spy, BTN_RADIUS, "speaker", spk_base)
+            self._draw_speaker_icon(spx, spy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=_on_bg(spk_base, strong=True))
             if self._audio_popup_open:
                 self._draw_audio_popup(spx, spy)
 
@@ -1353,6 +1369,7 @@ class App:
                 self._bt_powered    = self.bt.is_powered()
                 self._bt_devices    = self.bt.get_devices()
                 self._bt_refreshing = False
+                self._dirty         = True
             threading.Thread(target=_refresh_bt, daemon=True).start()
         if self.wifi and self.wifi.available and not self._wifi_refreshing:
             self._wifi_refreshing = True
@@ -1399,7 +1416,9 @@ class App:
             album["thumb"]         = None
             album["thumb_loading"] = False
         self._thumb_queued.clear()
-        self._thumbs_pending = 0
+        self._thumbs_pending = len(self._albums)
+        for i in range(len(self._albums)):
+            self._queue_thumb(i)
         self._cache_cleared_ms = pygame.time.get_ticks()
         self._dirty = True
 
@@ -1769,25 +1788,34 @@ class App:
     def _draw_speaker_icon(self, cx, cy, r, col=None):
         if col is None:
             col = _BTN_ICON_COL
-        # speaker body (trapezoid)
-        bw = max(2, r // 3)
-        bh = max(2, r // 2)
-        pts = [
-            (cx - r // 2,     cy - bh),
-            (cx - r // 2 + bw, cy - bh),
-            (cx + r // 3,      cy - r),
-            (cx + r // 3,      cy + r),
-            (cx - r // 2 + bw, cy + bh),
-            (cx - r // 2,      cy + bh),
+
+        # Total icon spans ~1.5r wide; shift origin left so it's centred on (cx,cy)
+        ox = cx - r // 5          # visual centre correction
+
+        # Speaker body: trapezoid — small end left, cone flares right
+        bh_sm = max(2, r * 3 // 10)   # half-height of small (left) end
+        bw    = max(2, r * 11 // 20)  # horizontal width of body
+        body_pts = [
+            (ox - bw,  cy - bh_sm),
+            (ox,       cy - r),
+            (ox,       cy + r),
+            (ox - bw,  cy + bh_sm),
         ]
-        pygame.gfxdraw.filled_polygon(self.screen, pts, col)
-        pygame.gfxdraw.aapolygon(self.screen, pts, col)
-        # sound wave arcs
-        for scale in (0.5, 0.85):
-            ar = int(r * scale)
-            pygame.draw.arc(self.screen, col,
-                            (cx + r // 6, cy - ar, ar, ar * 2),
-                            -math.pi / 3, math.pi / 3, max(1, r // 8))
+        pygame.gfxdraw.filled_polygon(self.screen, body_pts, col)
+        pygame.gfxdraw.aapolygon(self.screen, body_pts, col)
+
+        # Sound waves — polygon rings so no moiré/aliasing
+        wave_x = ox   # arcs centred at the cone tip
+        thick  = max(1, r // 7)
+        for scale in (0.52, 0.88):
+            ro = int(r * scale)
+            ri = max(1, ro - thick)
+            a1, a2, n = -math.pi / 3, math.pi / 3, 16
+            angles = [a1 + (a2 - a1) * i / (n - 1) for i in range(n)]
+            outer = [(wave_x + int(ro * math.cos(a)), cy + int(ro * math.sin(a))) for a in angles]
+            inner = [(wave_x + int(ri * math.cos(a)), cy + int(ri * math.sin(a))) for a in reversed(angles)]
+            pygame.gfxdraw.filled_polygon(self.screen, outer + inner, col)
+            pygame.gfxdraw.aapolygon(self.screen, outer + inner, col)
 
     def _draw_audio_popup(self, btn_x, btn_y):
         if not self._audio_sinks:
@@ -1810,17 +1838,28 @@ class App:
 
         dot_r = max(3, row_h // 10)
         for i, sink in enumerate(self._audio_sinks):
-            ry  = py + i * row_h
-            busy = self._audio_busy_id == sink["id"]
-            col  = COL_TRACK_NUM if busy else COL_TRACK_NORMAL
-            sl   = _render_text(self._f_track, sink["name"], col, pw - BTN_MARGIN * 2 - dot_r * 3)
+            ry           = py + i * row_h
+            bt_conn      = sink.get("bt_connected", True)
+            busy_key     = sink["id"] or sink.get("bt_addr")
+            busy         = self._audio_busy_id == busy_key
+            if busy:
+                col = COL_TRACK_NUM
+            elif not bt_conn:
+                col = COL_TEXT_ALBUM   # dimmed — not connected
+            else:
+                col = COL_TRACK_NORMAL
+            sl = _render_text(self._f_track, sink["name"], col, pw - BTN_MARGIN * 2 - dot_r * 3)
             self.screen.blit(sl, (px + BTN_MARGIN, ry + (row_h - sl.get_height()) // 2))
-            if sink["active"] and not busy:
-                dot_col = COL_HIGHLIGHT
-                dot_cx  = px + pw - BTN_MARGIN - dot_r
-                dot_cy  = ry + row_h // 2
-                pygame.gfxdraw.filled_circle(self.screen, dot_cx, dot_cy, dot_r, dot_col)
-                pygame.gfxdraw.aacircle(self.screen, dot_cx, dot_cy, dot_r, dot_col)
+            dot_cx = px + pw - BTN_MARGIN - dot_r
+            dot_cy = ry + row_h // 2
+            if busy:
+                pass  # no dot while connecting
+            elif sink["active"]:
+                accent_col = tuple(int(c) for c in self._accent_cur)
+                pygame.gfxdraw.filled_circle(self.screen, dot_cx, dot_cy, dot_r, accent_col)
+                pygame.gfxdraw.aacircle(self.screen, dot_cx, dot_cy, dot_r, accent_col)
+            elif not bt_conn:
+                pygame.gfxdraw.aacircle(self.screen, dot_cx, dot_cy, dot_r, COL_SEP)
             if i < len(self._audio_sinks) - 1:
                 pygame.draw.line(self.screen, COL_SEP,
                                    (px, ry + row_h - 1), (px + pw, ry + row_h - 1))
@@ -2499,6 +2538,26 @@ class App:
         dx, dy = pos[0] - gx, pos[1] - gy
         return dx * dx + dy * dy <= (BTN_RADIUS + 10) ** 2
 
+    def _build_audio_items(self) -> list[dict]:
+        sinks = self.audio.get_sinks() if (self.audio and self.audio.available) else []
+        items = [dict(s, bt_addr=None, bt_connected=True) for s in sinks]
+        if self.bt and self.bt.available:
+            for dev in self.bt.get_devices():
+                addr_u = dev["address"].replace(":", "_")
+                if any(addr_u in s["id"] for s in sinks):
+                    for item in items:
+                        if item["id"] and addr_u in item["id"]:
+                            item["bt_addr"] = dev["address"]
+                else:
+                    items.append({
+                        "id":           None,
+                        "name":         dev["name"],
+                        "active":       False,
+                        "bt_addr":      dev["address"],
+                        "bt_connected": False,
+                    })
+        return items
+
     def _speaker_btn_pos(self):
         sx = BTN_RADIUS + BTN_MARGIN
         sy = BTN_MARGIN + BTN_RADIUS
@@ -2526,6 +2585,17 @@ class App:
             return None
         i = (pos[1] - py) // row_h
         return self._audio_sinks[i] if 0 <= i < len(self._audio_sinks) else None
+
+    def _pressed_ctrl(self) -> str | None:
+        """Return which control button the current touch is pressing, or None."""
+        if self._t_start_pos is None or self._view != View.ALBUM or int(self._ctrl_a) <= 10:
+            return None
+        pos = self._t_start_pos
+        if self._close_btn_hit(pos):   return "close"
+        if self._stop_btn_hit(pos):    return "stop"
+        if self._speaker_btn_hit(pos): return "speaker"
+        if self._gear_btn_hit(pos):    return "gear"
+        return self._ctrl_zone(pos)    # "play" | "prev" | "next" | None
 
     def _ctrl_zone(self, pos) -> str | None:
         x, y = pos
@@ -2723,13 +2793,21 @@ class App:
                 # audio popup sink selection (check before other buttons)
                 sink = self._audio_popup_sink_at(pos)
                 if sink is not None:
-                    sid = sink["id"]
-                    self._audio_busy_id = sid
+                    busy_key = sink["id"] or sink.get("bt_addr")
+                    self._audio_busy_id = busy_key
                     self._dirty = True
-                    def _switch(s=sid):
-                        self.audio.set_sink(s)
-                        self._audio_sinks   = self.audio.get_sinks()
-                        self._audio_busy_id = None
+                    def _switch(snk=sink):
+                        sid      = snk["id"]
+                        bt_addr  = snk.get("bt_addr")
+                        if bt_addr and not snk.get("bt_connected"):
+                            self.bt.connect(bt_addr)
+                            import time; time.sleep(2)
+                            # PA sink name follows BlueZ convention
+                            sid = "bluez_sink." + bt_addr.replace(":", "_") + ".a2dp_sink"
+                        if sid and self.audio and self.audio.available:
+                            self.audio.set_sink(sid)
+                        self._audio_sinks      = self._build_audio_items()
+                        self._audio_busy_id    = None
                         self._audio_popup_open = False
                         self._dirty = True
                     threading.Thread(target=_switch, daemon=True).start()
@@ -2750,7 +2828,7 @@ class App:
                 if self._speaker_btn_hit(pos):
                     self._audio_popup_open = not self._audio_popup_open
                     if self._audio_popup_open:
-                        self._audio_sinks = self.audio.get_sinks()
+                        self._audio_sinks = self._build_audio_items()
                     self._dirty = True
                     return
                 if self._gear_btn_hit(pos):
@@ -2762,6 +2840,9 @@ class App:
                 elif zone == "next":
                     self.player.next(); self._reset_elapsed()
                 elif zone == "play":
+                    playing = self._status.get("state") == "play"
+                    self._status["state"] = "pause" if playing else "play"
+                    self._dirty = True
                     self.player.toggle()
                 else:
                     self._hide_controls()
@@ -2782,6 +2863,8 @@ class App:
     def _exec_double_tap(self):
         if self._view in (View.ALBUM, View.TRACKLIST):
             playing = self._status.get("state") == "play"
+            self._status["state"] = "pause" if playing else "play"
+            self._dirty = True
             self.player.toggle()
             self._show_flash("pause" if playing else "play")
 
@@ -3125,6 +3208,7 @@ class App:
                 if self._panel_touch:
                     self._panel_drag_base_y = self._album_y
                     self._panel_drag_start  = pos[1]
+            self._dirty = True   # immediate press highlight
 
         elif event.type in (pygame.MOUSEMOTION, pygame.FINGERMOTION):
             if self._t_start_pos is None:
@@ -3255,6 +3339,7 @@ class App:
             self._t_prev_pos     = None
             self._t_dragging     = False
             self._t_long_pressed = False
+            self._dirty          = True   # clear press highlight
             self._panel_touch    = False
             self._lyrics_drag    = False
 

@@ -50,7 +50,7 @@ THUMB_WORKERS  = 3           # parallel thumbnail fetch threads (keep low on Pi 
 SCROLL_FRICTION = 0.95       # per-frame velocity multiplier (higher = less friction)
 
 # ── Grid ──────────────────────────────────────────────────────────────────────
-GRID_COLS      = 2
+GRID_COLS      = 3
 GRID_PAD       = _s(70/GRID_COLS)      # outer margin + gap between cells
 GRID_TEXT_H    = _s(54)      # height reserved below thumbnail for name/artist
 

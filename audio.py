@@ -38,6 +38,12 @@ class AudioOutputManager:
             _run("wpctl", "set-default", sink_id)
         elif self.backend == "pactl":
             _run("pactl", "set-default-sink", sink_id)
+            # move existing streams to the new sink
+            inputs = _run("pactl", "list", "sink-inputs", "short")
+            for line in inputs.splitlines():
+                parts = line.split()
+                if parts:
+                    _run("pactl", "move-sink-input", parts[0], sink_id)
 
     # ── backends ──────────────────────────────────────────────────────────────
 
@@ -62,8 +68,10 @@ class AudioOutputManager:
         return sinks
 
     def _sinks_pactl(self) -> list[dict]:
-        out     = _run("pactl", "list", "sinks")
-        default = _run("pactl", "get-default-sink").strip()
+        out  = _run("pactl", "list", "sinks")
+        info = _run("pactl", "info")
+        m    = re.search(r"Default Sink:\s+(\S+)", info)
+        default = m.group(1) if m else ""
         sinks   = []
         sid, name = None, None
         for line in out.splitlines():
