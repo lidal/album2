@@ -1725,10 +1725,10 @@ class App:
                 if self.audio and self.audio.available:
                     spx, spy = self._speaker_btn_pos()
                     circle(spx, spy, BTN_RADIUS + 10)   # speaker
-                ctrl_y1, ctrl_y2 = H // 4, 3 * H // 4
-                rect(0,           ctrl_y1, W // 3, ctrl_y2 - ctrl_y1)   # prev
-                rect(W // 3,      ctrl_y1, W // 3, ctrl_y2 - ctrl_y1)   # play
-                rect(2 * W // 3,  ctrl_y1, W // 3, ctrl_y2 - ctrl_y1)   # next
+                ctrl_cy = H // 2
+                circle(W // 2,     ctrl_cy, CTRL_ICON_LG + 10)   # play
+                circle(W // 6,     ctrl_cy, CTRL_ICON_SM + 10)   # prev
+                circle(5 * W // 6, ctrl_cy, CTRL_ICON_SM + 10)   # next
                 # lyrics drag zone
                 if (self._lyrics_parsed and self._lyrics_parsed[1] is None):
                     y_lyr = H // 2 + CTRL_BAR_H // 2 + CTRL_TEXT_GAP * 2
@@ -2599,12 +2599,20 @@ class App:
 
     def _ctrl_zone(self, pos) -> str | None:
         x, y = pos
-        # Controls sit in the middle third of the screen vertically
-        if y < H // 4 or y > 3 * H // 4:
-            return None
-        if x < W // 3:     return "prev"
-        if x > 2 * W // 3: return "next"
-        return "play"
+        ctrl_cy = H // 2
+        # play/pause — circle matching the visual CTRL_ICON_LG circle
+        dx, dy = x - W // 2, y - ctrl_cy
+        if dx * dx + dy * dy <= (CTRL_ICON_LG + 10) ** 2:
+            return "play"
+        # prev — circle around the two left triangles
+        dx, dy = x - W // 6, y - ctrl_cy
+        if dx * dx + dy * dy <= (CTRL_ICON_SM + 10) ** 2:
+            return "prev"
+        # next — circle around the two right triangles
+        dx, dy = x - 5 * W // 6, y - ctrl_cy
+        if dx * dx + dy * dy <= (CTRL_ICON_SM + 10) ** 2:
+            return "next"
+        return None
 
     # ── tap execution ─────────────────────────────────────────────────────────
 
