@@ -493,7 +493,7 @@ class App:
                         full = None
                 if full and not os.path.exists(thumb_jpg):
                     thumb = full.resize((_CELL_W, _CELL_W), Image.LANCZOS)
-                    thumb.save(thumb_jpg, "JPEG", quality=60)
+                    thumb.save(thumb_jpg, "JPEG", quality=80)
                 else:
                     thumb = full
 
@@ -1152,13 +1152,13 @@ class App:
     def _progress_bar_y(self) -> int:
         """Return the screen y coordinate of the progress bar's top edge."""
         ay = self._album_y
-        y  = min(H - PROGRESS_H - 1, int(ay) + H - PROGRESS_H - 1)
+        y  = min(H - PROGRESS_H, int(ay) + H - PROGRESS_H)
         if ay < 0 and self._tracks:
             cur_file = self._song.get("file", "")
             for i, track in enumerate(self._tracks):
                 if track.get("file", "") == cur_file:
                     row_y  = TRACKLIST_ART_H + i * TRACK_ROW_H - int(self._tl_scroll)
-                    target = min(H - PROGRESS_H - 1, row_y + TRACK_ROW_H - PROGRESS_H - 1)
+                    target = min(H - PROGRESS_H, row_y + TRACK_ROW_H - PROGRESS_H)
                     y = max(target, y)
                     break
         return y
@@ -1194,9 +1194,6 @@ class App:
                     pygame.draw.rect(self.screen, COL_PROGRESS_FG, (0, y, fw, PROGRESS_H),
                                      border_top_left_radius=0, border_bottom_left_radius=0,
                                      border_top_right_radius=cr, border_bottom_right_radius=cr)
-            # Keep the very last scan line background-coloured so the DPI panel's
-            # row-wrap artefact at row 0 is invisible.
-            pygame.draw.line(self.screen, COL_BG, (0, H - 1), (W - 1, H - 1))
 
     def _draw_volume_badge(self):
         if not self.vc.available:
