@@ -4,8 +4,9 @@ import os
 _PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
 _DEFAULTS: dict = {
-    "autoplay":   False,
-    "lyrics":     True,
+    "autoplay":     False,
+    "lyrics":       True,
+    "grid_labels":  True,
     "debug":      False,
     "idle_fps":   True,
     "skip_draw":  True,

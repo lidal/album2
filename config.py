@@ -51,12 +51,12 @@ SCROLL_FRICTION = 0.95       # per-frame velocity multiplier (higher = less fric
 
 # ── Grid ──────────────────────────────────────────────────────────────────────
 GRID_COLS      = 2
-GRID_PAD       = _s(35)      # outer margin + gap between cells
+GRID_PAD       = _s(70/GRID_COLS)      # outer margin + gap between cells
 GRID_TEXT_H    = _s(54)      # height reserved below thumbnail for name/artist
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 MINI_H          = _s(176)    # mini-player bar height at top of GRID view
-TRACKLIST_ART_H = _s(144)    # album art strip at top when tracklist open (~1/5 of 720)
+TRACKLIST_ART_H = _s(176)    # album art strip at top when tracklist open (~1/5 of 720)
 TRACK_ROW_H     = _s(54)     # height of one track row
 CTRL_BAR_H      = _s(88)     # height of prev/play/next strip in controls overlay
 PROGRESS_H      = _s(5)      # gold bar at very bottom
