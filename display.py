@@ -3,8 +3,7 @@ Album2 — main UI.
 
 View state machine
 ──────────────────
-  GRID      album grid; mini-player bar at top when album loaded normally,
-            OR album art strip at top when peeking (_peeking=True)
+  GRID      album grid; album art strip at bottom when peeking (_peeking=True)
   ALBUM     full album art, no text overlay
   TRACKLIST album art slides UP (stays visible in top strip), tracklist below
 
@@ -31,7 +30,6 @@ Touch gestures (GRID / peek)
   tap album strip (peeking)  → return to ALBUM view
   swipe up (peeking)         → return to ALBUM view
   tap album cell             → load album (paused), open ALBUM view
-  tap mini-player            → re-open ALBUM view
   vertical drag              → scroll grid
 """
 
@@ -45,6 +43,7 @@ import math
 import os
 import re
 import pygame.gfxdraw
+import colorsys
 import threading
 import time
 from enum import IntEnum
@@ -57,14 +56,14 @@ from PIL import Image
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
     GRID_COLS, GRID_PAD, GRID_TEXT_H,
-    MINI_H, TRACKLIST_ART_H, TRACK_ROW_H, CTRL_BAR_H, PROGRESS_H, SCRUB_LEEWAY,
+    TRACKLIST_ART_H, TRACK_ROW_H, CTRL_BAR_H, PROGRESS_H, SCRUB_LEEWAY,
     ANIM_SPEED, CTRL_FADE_SPEED,
     SWIPE_V_MIN, SWIPE_H_MIN, TAP_MAX_MOVE, TAP_MAX_MS, DOUBLE_TAP_MS, DRAG_THRESH,
     VOLUME_BADGE_MS, CTRL_TIMEOUT_MS, SCROLL_FRICTION, FPS,
     BTN_MARGIN, BTN_RADIUS, BTN_GAP, CTRL_ICON_SM, CTRL_ICON_LG, CTRL_TEXT_GAP,
-    TOGGLE_W, TOGGLE_H, TRACK_PAD, MINI_PAD, MINI_ICON_SIZE, VOL_BADGE_PAD,
+    TOGGLE_W, TOGGLE_H, TRACK_PAD, VOL_BADGE_PAD,
     LONG_PRESS_MS,
-    COL_BG, COL_GRID_BG, COL_CELL_BG, COL_MINI_BG, COL_TL_BG, COL_SEP,
+    COL_BG, COL_GRID_BG, COL_CELL_BG, COL_TL_BG, COL_SEP,
     COL_TEXT_TITLE, COL_TEXT_ARTIST, COL_TEXT_ALBUM,
     COL_TRACK_PLAYING, COL_TRACK_NORMAL, COL_TRACK_NUM, COL_TRACK_DUR,
     COL_PROGRESS_BG, COL_PROGRESS_FG,
@@ -118,7 +117,22 @@ def _pil_to_surf(img: Image.Image) -> pygame.Surface:
 
 
 _SURF_CACHE: dict = {}
-_SURF_CACHE_MAX = 300
+_SURF_CACHE_MAX = 128
+
+def _lum(r: float, g: float, b: float) -> float:
+    """Perceived luminance, 0–1."""
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+
+def _on_bg(bg: tuple, strong=True) -> tuple:
+    """Return a foreground colour with good contrast against bg.
+    strong=True → title weight; False → dimmed weight (track numbers)."""
+    l = _lum(*bg[:3])
+    if strong:
+        return (240, 240, 240) if l < 0.55 else (20, 20, 20)
+    else:
+        return (195, 195, 195) if l < 0.55 else (80, 80, 80)
+
 
 def _render_text(font, text: str, colour, max_w: int = 0) -> pygame.Surface:
     key = (id(font), text, colour, max_w)
@@ -198,12 +212,14 @@ class View(IntEnum):
 
 
 _SETTINGS_ITEMS = [
-    (None,        "PLAYBACK"),
-    ("autoplay",  "Autoplay when opening album"),
-    ("lyrics",    "Show lyrics"),
-    (None,        "PERFORMANCE"),
-    ("idle_fps",  "Reduce FPS when idle"),
-    ("skip_draw", "Skip redraw when nothing changed"),
+    (None,          "PLAYBACK"),
+    ("autoplay",    "Autoplay when opening album"),
+    ("lyrics",      "Show lyrics"),
+    (None,          "GRID"),
+    ("grid_labels", "Show album & artist names"),
+    (None,          "PERFORMANCE"),
+    ("idle_fps",    "Reduce FPS when idle"),
+    ("skip_draw",   "Skip redraw when nothing changed"),
 ]
 
 # Keyboard rows: list of (label, weight).  Special labels: SHIFT BACK OK SPACE SYM ABC
@@ -254,7 +270,6 @@ class App:
         self._f_album_f  = _font(FONT_SZ_ALBUM)
         self._f_grid     = _font(FONT_SZ_GRID)
         self._f_grid_sm  = _font(FONT_SZ_GRID_SM)
-        self._f_mini     = _font(FONT_SZ_MINI)
         self._f_track    = _font(FONT_SZ_TRACK)
         self._f_track_sm = _font(FONT_SZ_TRACK_SM)
         self._f_lyrics   = _font(FONT_SZ_LYRICS)
@@ -280,6 +295,11 @@ class App:
         # switching back to a previous album is instant.
         self._art_mem: collections.OrderedDict[str, pygame.Surface | None] = \
             collections.OrderedDict()
+        self._palette_col: dict[str, tuple] = {}        # uri → (bg, accent)
+        self._tl_bg_cur:  list  = list(COL_TL_BG)      # current (animated) tl bg colour
+        self._tl_bg_t:    tuple = COL_TL_BG             # target tl bg colour
+        self._accent_cur: list  = list(COL_HIGHLIGHT)   # current (animated) accent colour
+        self._accent_t:   tuple = COL_HIGHLIGHT         # target accent colour
 
         # default background
         self._default_bg = self._make_default_bg()
@@ -400,9 +420,6 @@ class App:
         # last user-input timestamp — keep full FPS for a settling window after input
         self._last_input_ms: int = 0
 
-        # mini-player art cache (avoid smoothscale every frame)
-        self._mini_art:     pygame.Surface | None = None
-        self._mini_art_src: object = None   # identity of self._art when cached
 
         # lyrics visual-row cache (avoid re-wrapping every frame)
         self._lyrics_row_cache: tuple | None = None  # (parsed_ref, rows, logical, first_vis)
@@ -434,23 +451,60 @@ class App:
     def _make_default_bg(self) -> pygame.Surface:
         s = pygame.Surface((W, H))
         s.fill(COL_BG)
-        cx, cy = W // 2, H // 2
-        for r in range(28, 345, 20):
-            a = max(18, 70 - r // 5)
-            pygame.gfxdraw.aacircle(s, cx, cy, r, (a, a, a + 8))
-        pygame.gfxdraw.filled_circle(s, cx, cy, 26, (35, 35, 45))
-        pygame.gfxdraw.aacircle(s, cx, cy, 26, (35, 35, 45))
         return s
+
+    @staticmethod
+    def _palette_colors_from_image(img: Image.Image) -> tuple[tuple, tuple]:
+        """Return (bg_col, accent_col) derived from the album art palette.
+        bg_col  — dark, for tracklist background.
+        accent_col — vivid, replaces COL_HIGHLIGHT for buttons and progress bar.
+        """
+        small = img.resize((64, 64), Image.LANCZOS).convert("RGB")
+        q     = small.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
+        pal   = q.getpalette()[:8 * 3]
+
+        # count pixels per palette entry so coverage drives the choice,
+        # not just saturation (avoids small-area accent colours like logos winning)
+        counts = [0] * 8
+        for p in q.getdata():
+            if p < 8:
+                counts[p] += 1
+        total = max(1, sum(counts))
+
+        best_col, best_score = None, -1.0
+        for i in range(8):
+            r, g, b  = pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]
+            _, s, v  = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            if v < 0.15 or v > 0.95:   # skip near-black and near-white
+                continue
+            coverage = counts[i] / total
+            score    = coverage * (0.5 * s + 0.5 * v)
+            if score > best_score:
+                best_score = score
+                best_col   = (r, g, b)
+
+        if best_col is None:   # all colours were too dark/light — fall back
+            best_col = COL_TL_BG
+
+        r, g, b = best_col
+        # bg: dark tint
+        f = 0.48
+        bg = (max(8, int(r * f)), max(8, int(g * f)), max(8, int(b * f)))
+        # accent: vivid — same hue, boosted saturation, fixed high brightness
+        h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        s = min(1.0, s + 0.2)
+        v = 0.88
+        ar, ag, ab = colorsys.hsv_to_rgb(h, s, v)
+        accent = (int(ar * 255), int(ag * 255), int(ab * 255))
+        return bg, accent
 
     # ── album list + thumbnails ───────────────────────────────────────────────
 
     def _load_albums(self):
         self._albums          = self.player.get_albums()
-        self._thumbs_pending  = len(self._albums)
+        self._thumbs_pending  = 0
         self._dirty           = True
         log.info("Loaded %d albums", len(self._albums))
-        for i in range(len(self._albums)):
-            self._queue_thumb(i)
 
     def _queue_thumb(self, idx: int):
         if idx in self._thumb_queued:
@@ -470,12 +524,12 @@ class App:
         full_png  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
         full_jpg  = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")  # legacy
         try:
-            if os.path.exists(thumb_jpg) and os.path.exists(full_png):
-                # Both cached — fast path: load each directly.
+            full = None
+            if os.path.exists(thumb_jpg):
+                # Thumbnail already cached — load only the small file, skip full image entirely.
                 thumb = Image.open(thumb_jpg).convert("RGB")
-                full  = Image.open(full_png).convert("RGB")
             else:
-                # Need the full-size image to (re)generate missing files.
+                # Need the full-size image to generate the thumbnail.
                 if os.path.exists(full_png):
                     full = Image.open(full_png).convert("RGB")
                 elif os.path.exists(full_jpg):
@@ -497,15 +551,10 @@ class App:
                 else:
                     thumb = full
 
-            if full:
-                full_wh = full.resize((W, H), Image.LANCZOS) if full.size != (W, H) else full
-                self._art_mem[uri] = _pil_to_surf(full_wh)
-                if len(self._art_mem) > self._ART_MEM_MAX:
-                    self._art_mem.popitem(last=False)
-                thumb_surf = thumb.resize((_CELL_W, _CELL_W), Image.LANCZOS) if thumb.size != (_CELL_W, _CELL_W) else thumb
-                album["thumb"] = _pil_to_surf(thumb_surf)
+            if thumb:
+                th = thumb.resize((_CELL_W, _CELL_W), Image.LANCZOS) if thumb.size != (_CELL_W, _CELL_W) else thumb
+                album["thumb"] = _pil_to_surf(th)
             else:
-                self._art_mem[uri] = None
                 album["thumb"] = None
         except Exception as e:
             log.debug("Thumb %d: %s", idx, e)
@@ -516,7 +565,7 @@ class App:
 
     # ── album art ─────────────────────────────────────────────────────────────
 
-    _ART_MEM_MAX = 3   # full-size art surfaces kept in memory (~2 MB each)
+    _ART_MEM_MAX = 1   # full-size art surface kept in memory (~2 MB each)
 
     def _load_art(self, uri: str):
         # Serve from memory cache instantly when available
@@ -525,6 +574,9 @@ class App:
             self._art         = self._art_mem[uri]
             self._art_loading = False
             self._dirty       = True
+            cols = self._palette_col.get(uri)
+            self._tl_bg_t   = cols[0] if cols else COL_TL_BG
+            self._accent_t  = cols[1] if cols else COL_HIGHLIGHT
             return
 
         self._art         = None   # clear old art so spinner shows
@@ -535,6 +587,7 @@ class App:
             key      = hashlib.md5(uri.encode()).hexdigest()
             path_png = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.png")
             path_jpg = os.path.join(_THUMB_CACHE_DIR, f"{key}_{DISPLAY_WIDTH}.jpg")  # legacy
+            img = None
             try:
                 if os.path.exists(path_png):
                     img = Image.open(path_png).convert("RGB")
@@ -553,6 +606,7 @@ class App:
                     if img.size != (W, H):
                         img = img.resize((W, H), Image.LANCZOS)
                     surf = _pil_to_surf(img)
+                    self._palette_col[uri] = self._palette_colors_from_image(img)
                 else:
                     surf = None
             except Exception as e:
@@ -583,6 +637,10 @@ class App:
 
         self._album_y = _lerp(self._album_y, self._album_y_t, k_pan)
         self._ctrl_a  = _lerp(self._ctrl_a,  self._ctrl_a_t,  k_ctl)
+
+        k_bg = min(1.0, 3.0 * dt)
+        self._tl_bg_cur = [_lerp(self._tl_bg_cur[i], self._tl_bg_t[i], k_bg) for i in range(3)]
+        self._accent_cur = [_lerp(self._accent_cur[i], self._accent_t[i], k_bg) for i in range(3)]
 
         if dt > 0:
             self._fps_avg = self._fps_avg * 0.9 + (1.0 / dt) * 0.1
@@ -615,6 +673,9 @@ class App:
             self._art         = pending   # may be None → use default
             self._art_loading = False
             self._dirty       = True
+            cols = self._palette_col.get(self._art_album_uri)
+            self._tl_bg_t  = cols[0] if cols else COL_TL_BG
+            self._accent_t = cols[1] if cols else COL_HIGHLIGHT
 
         # mark dirty for ongoing animations/playback BEFORE resolving taps/events
         # so that pending_tap=True is captured before it gets cleared below
@@ -622,10 +683,12 @@ class App:
             self._dirty = (
                 abs(self._album_y - self._album_y_t) > 0.5
                 or abs(self._ctrl_a - self._ctrl_a_t) > 0.5
+                or any(abs(self._tl_bg_cur[i] - self._tl_bg_t[i]) > 0.5 for i in range(3))
+                or any(abs(self._accent_cur[i] - self._accent_t[i]) > 0.5 for i in range(3))
 
                 or self._flash_alpha > 0
                 or self._pending_tap
-                or self._progress_px_changed()
+                or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or now_ms < self._vol_until_ms
                 or self._bt_refreshing
                 or self._wifi_refreshing
@@ -758,11 +821,11 @@ class App:
             self._dirty = (
                 abs(self._album_y - self._album_y_t) > 0.5
                 or abs(self._ctrl_a - self._ctrl_a_t) > 0.5
+                or any(abs(self._tl_bg_cur[i] - self._tl_bg_t[i]) > 0.5 for i in range(3))
 
                 or self._flash_alpha > 0
                 or self._pending_tap
-                or self._progress_px_changed()
-                or now_ms < self._vol_until_ms
+                or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or self._bt_refreshing
                 or self._wifi_refreshing
                 or self._scan_refreshing
@@ -881,10 +944,14 @@ class App:
                                     grid_top + (H - grid_top) // 2))
             return
 
-        grid_bottom = (H - TRACKLIST_ART_H) if self._peeking else H
+        grid_bottom  = (H - TRACKLIST_ART_H) if self._peeking else H
+        show_labels  = settings.get("grid_labels")
+        label_h      = GRID_TEXT_H if show_labels else 0
+        cell_h       = _CELL_W + label_h
+        row_h        = cell_h + GRID_PAD
 
         total_rows = (len(self._albums) + GRID_COLS - 1) // GRID_COLS
-        max_scroll = max(0, total_rows * _ROW_H + GRID_PAD - (grid_bottom - grid_top))
+        max_scroll = max(0, total_rows * row_h + GRID_PAD - (grid_bottom - grid_top))
         self._grid_scroll = max(0.0, min(self._grid_scroll, float(max_scroll)))
 
         old_clip = self.screen.get_clip()
@@ -895,14 +962,14 @@ class App:
                 row = i // GRID_COLS
                 col = i % GRID_COLS
                 x   = GRID_PAD + col * (_CELL_W + GRID_PAD)
-                y   = grid_top + GRID_PAD + row * _ROW_H - int(self._grid_scroll)
+                y   = grid_top + GRID_PAD + row * row_h - int(self._grid_scroll)
 
                 # preload thumbnails two rows outside the visible area
-                if (y + _CELL_H >= grid_top - _ROW_H * 2
-                        and y <= H + _ROW_H * 2):
+                if (y + cell_h >= grid_top - row_h * 2
+                        and y <= H + row_h * 2):
                     self._queue_thumb(i)
 
-                if y + _CELL_H < grid_top or y > H:
+                if y + cell_h < grid_top or y > H:
                     continue
 
                 thumb = album.get("thumb")
@@ -912,64 +979,14 @@ class App:
                     pygame.draw.rect(self.screen, COL_CELL_BG,
                                       (x, y, _CELL_W, _CELL_W), border_radius=4)
 
-                ty = y + _CELL_W + 4
-                sn = _render_text(self._f_grid,    album["name"],   COL_TEXT_TITLE,  _CELL_W)
-                sa = _render_text(self._f_grid_sm, album["artist"], COL_TEXT_ARTIST, _CELL_W)
-                self.screen.blit(sn, (x, ty))
-                self.screen.blit(sa, (x, ty + sn.get_height() + 2))
+                if show_labels:
+                    ty = y + _CELL_W + 4
+                    sn = _render_text(self._f_grid,    album["name"],   COL_TEXT_TITLE,  _CELL_W)
+                    sa = _render_text(self._f_grid_sm, album["artist"], COL_TEXT_ARTIST, _CELL_W)
+                    self.screen.blit(sn, (x, ty))
+                    self.screen.blit(sa, (x, ty + sn.get_height() + 2))
         finally:
             self.screen.set_clip(old_clip)
-
-    def _draw_mini_player(self):
-        pygame.draw.rect(self.screen, COL_MINI_BG, (0, 0, W, MINI_H))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, MINI_H - 1), (W, MINI_H - 1))
-
-        art_sz = MINI_H - MINI_PAD * 2
-
-        # art — cache the scaled-down version so we don't smoothscale every frame
-        thumb_surf = None
-        if self._art:
-            if self._mini_art_src is not self._art:
-                self._mini_art     = pygame.transform.smoothscale(self._art, (art_sz, art_sz))
-                self._mini_art_src = self._art
-            thumb_surf = self._mini_art
-        elif self._cur_idx is not None:
-            th = self._albums[self._cur_idx].get("thumb")
-            if th:
-                thumb_surf = pygame.transform.smoothscale(th, (art_sz, art_sz))
-        if thumb_surf:
-            self.screen.blit(thumb_surf, (MINI_PAD, MINI_PAD))
-        else:
-            pygame.draw.rect(self.screen, COL_CELL_BG, (MINI_PAD, MINI_PAD, art_sz, art_sz), border_radius=3)
-
-        # text
-        info_x = MINI_PAD + art_sz + MINI_PAD
-        info_w  = W - info_x - MINI_ICON_SIZE * 3
-        title   = self._song.get("title") or (
-            self._albums[self._cur_idx]["name"] if self._cur_idx is not None else "—")
-        artist  = self._song.get("artist") or (
-            self._albums[self._cur_idx]["artist"] if self._cur_idx is not None else "")
-
-        text_y = (MINI_H - FONT_SZ_MINI - FONT_SZ_GRID_SM - MINI_PAD) // 2
-        s = _render_text(self._f_mini, title, COL_TEXT_TITLE, info_w)
-        self.screen.blit(s, (info_x, text_y))
-        s = _render_text(self._f_grid_sm, artist, COL_TEXT_ARTIST, info_w)
-        self.screen.blit(s, (info_x, text_y + FONT_SZ_MINI + MINI_PAD // 2))
-
-        # play/pause icon
-        playing = self._status.get("state") == "play"
-        if playing:
-            _draw_pause(self.screen, COL_TEXT_TITLE, W - MINI_ICON_SIZE - MINI_PAD, MINI_H // 2, MINI_ICON_SIZE)
-        else:
-            _draw_play(self.screen, COL_TEXT_TITLE, W - MINI_ICON_SIZE - MINI_PAD, MINI_H // 2, MINI_ICON_SIZE)
-
-        # progress line
-        el  = float(self._status.get("elapsed",  0) or 0)
-        dur = float(self._status.get("duration", 0) or 0)
-        if dur > 0:
-            fw = int(W * el / dur)
-            pygame.draw.rect(self.screen, COL_PROGRESS_BG, (0, MINI_H - 3, W, 3))
-            pygame.draw.rect(self.screen, COL_PROGRESS_FG, (0, MINI_H - 3, fw, 3))
 
     # ── draw: album panel ─────────────────────────────────────────────────────
 
@@ -1042,42 +1059,43 @@ class App:
         _draw_triangle(self.screen, col, 5 * W // 6 - off, ctrl_cy, CTRL_ICON_SM, "right")
         _draw_triangle(self.screen, col, 5 * W // 6 + off, ctrl_cy, CTRL_ICON_SM, "right")
 
+        accent   = tuple(int(c) for c in self._accent_cur)
+        icon_col = _on_bg(accent, strong=True)
+
         # gear (settings) button — left of close button
         gx = W - BTN_RADIUS - BTN_MARGIN - 2 * BTN_RADIUS - BTN_GAP
         gy = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, gx, gy, BTN_RADIUS, COL_HIGHLIGHT)
-        pygame.gfxdraw.aacircle(self.screen, gx, gy, BTN_RADIUS, COL_HIGHLIGHT)
-        self._draw_gear_icon(gx, gy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12))
+        pygame.gfxdraw.filled_circle(self.screen, gx, gy, BTN_RADIUS, accent)
+        pygame.gfxdraw.aacircle(self.screen, gx, gy, BTN_RADIUS, accent)
+        self._draw_gear_icon(gx, gy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=icon_col, hole_col=accent)
 
         # close button (top-right) — hides controls only
         bx = W - BTN_RADIUS - BTN_MARGIN
         by = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, bx, by, BTN_RADIUS, COL_HIGHLIGHT)
-        pygame.gfxdraw.aacircle(self.screen, bx, by, BTN_RADIUS, COL_HIGHLIGHT)
+        pygame.gfxdraw.filled_circle(self.screen, bx, by, BTN_RADIUS, accent)
+        pygame.gfxdraw.aacircle(self.screen, bx, by, BTN_RADIUS, accent)
         d = max(1, BTN_RADIUS * 11 // 32)
-        xc = _BTN_ICON_COL
-        pygame.draw.aaline(self.screen, xc, (bx - d, by - d), (bx + d, by + d))
-        pygame.draw.aaline(self.screen, xc, (bx - d + 1, by - d), (bx + d + 1, by + d))
-        pygame.draw.aaline(self.screen, xc, (bx + d, by - d), (bx - d, by + d))
-        pygame.draw.aaline(self.screen, xc, (bx + d + 1, by - d), (bx - d + 1, by + d))
+        pygame.draw.aaline(self.screen, icon_col, (bx - d, by - d), (bx + d, by + d))
+        pygame.draw.aaline(self.screen, icon_col, (bx - d + 1, by - d), (bx + d + 1, by + d))
+        pygame.draw.aaline(self.screen, icon_col, (bx + d, by - d), (bx - d, by + d))
+        pygame.draw.aaline(self.screen, icon_col, (bx + d + 1, by - d), (bx - d + 1, by + d))
 
         # stop button (top-left) — stops playback and returns to grid
         sx = BTN_RADIUS + BTN_MARGIN
         sy = BTN_MARGIN + BTN_RADIUS
-        pygame.gfxdraw.filled_circle(self.screen, sx, sy, BTN_RADIUS, COL_HIGHLIGHT)
-        pygame.gfxdraw.aacircle(self.screen, sx, sy, BTN_RADIUS, COL_HIGHLIGHT)
+        pygame.gfxdraw.filled_circle(self.screen, sx, sy, BTN_RADIUS, accent)
+        pygame.gfxdraw.aacircle(self.screen, sx, sy, BTN_RADIUS, accent)
         sq = max(1, BTN_RADIUS * 13 // 32)
-        pygame.draw.rect(self.screen, _BTN_ICON_COL,
-                         (sx - sq, sy - sq, sq * 2, sq * 2))
+        pygame.draw.rect(self.screen, icon_col, (sx - sq, sy - sq, sq * 2, sq * 2))
 
         # speaker button — right of stop button
         if self.audio and self.audio.available:
             spx = sx + 2 * BTN_RADIUS + BTN_GAP
             spy = sy
-            bg  = COL_HIGHLIGHT if self._audio_popup_open else (55, 55, 65)
+            bg  = accent if self._audio_popup_open else (55, 55, 65)
             pygame.gfxdraw.filled_circle(self.screen, spx, spy, BTN_RADIUS, bg)
             pygame.gfxdraw.aacircle(self.screen, spx, spy, BTN_RADIUS, bg)
-            self._draw_speaker_icon(spx, spy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12))
+            self._draw_speaker_icon(spx, spy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=_on_bg(bg, strong=True))
             if self._audio_popup_open:
                 self._draw_audio_popup(spx, spy)
 
@@ -1092,9 +1110,9 @@ class App:
         # because _album_y == _TL_ALBUM_Y when fully open.
         clip_h = H - TRACKLIST_ART_H - PROGRESS_H
 
-        pygame.draw.rect(self.screen, COL_TL_BG,
+        pygame.draw.rect(self.screen, tuple(int(c) for c in self._tl_bg_cur),
                           (0, TRACKLIST_ART_H, W, clip_h + PROGRESS_H))
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (0, TRACKLIST_ART_H), (W, TRACKLIST_ART_H))
 
         if not self._tracks:
@@ -1122,21 +1140,27 @@ class App:
 
     def _draw_track_row(self, idx: int, track: dict, y: int, cur_file: str):
         is_playing = track.get("file", "") == cur_file
+        row_bg     = tuple(int(c) for c in self._tl_bg_cur)
         if is_playing:
-            pygame.draw.rect(self.screen, (24, 22, 14), (0, y, W, TRACK_ROW_H))
+            row_bg = tuple(min(255, int(c * 2.2)) for c in self._tl_bg_cur)
+            pygame.draw.rect(self.screen, row_bg, (0, y, W, TRACK_ROW_H))
 
-        col_title = COL_TRACK_PLAYING if is_playing else COL_TRACK_NORMAL
+        col_title = _on_bg(row_bg, strong=True)
+        col_dim   = _on_bg(row_bg, strong=False)
 
         num = str(track.get("track", idx + 1) or idx + 1).split("/")[0].zfill(2)
-        sn  = _render_text(self._f_track_sm, num, COL_TRACK_NUM)
+        sn  = _render_text(self._f_track_sm, num, col_dim)
         self.screen.blit(sn, (TRACK_PAD, y + (TRACK_ROW_H - sn.get_height()) // 2))
 
         raw_dur = track.get("duration") or track.get("time", 0)
         dur_s   = int(float(raw_dur or 0))
         dur_str = f"{dur_s // 60}:{dur_s % 60:02d}"
-        sd = _render_text(self._f_track_sm, dur_str, COL_TRACK_DUR)
+        sd = _render_text(self._f_track_sm, dur_str, col_dim)
         self.screen.blit(sd, (W - TRACK_PAD - sd.get_width(),
                                 y + (TRACK_ROW_H - sd.get_height()) // 2))
+
+        if not is_playing:
+            col_title = COL_TRACK_NORMAL
 
         title   = track.get("title") or track.get("name") or "—"
         title_x = TRACK_PAD + sn.get_width() + TRACK_PAD * 3 // 4
@@ -1144,7 +1168,7 @@ class App:
         st = _render_text(self._f_track, title, col_title, title_w)
         self.screen.blit(st, (title_x, y + (TRACK_ROW_H - st.get_height()) // 2))
 
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (TRACK_PAD, y + TRACK_ROW_H - 1), (W - TRACK_PAD, y + TRACK_ROW_H - 1))
 
     # ── draw: progress bar + volume badge ─────────────────────────────────────
@@ -1175,6 +1199,7 @@ class App:
 
         y = self._progress_bar_y()
 
+        pfg = tuple(int(c) for c in self._accent_cur)
         if self._scrub_active:
             bar_h = max(PROGRESS_H * 3, 12)
             cr = bar_h // 2
@@ -1182,7 +1207,7 @@ class App:
             pygame.draw.rect(self.screen, COL_PROGRESS_BG, (0, by2, W, bar_h))
             fw = int(W * self._scrub_frac)
             if fw > 0:
-                pygame.draw.rect(self.screen, COL_PROGRESS_FG, (0, by2, fw, bar_h),
+                pygame.draw.rect(self.screen, pfg, (0, by2, fw, bar_h),
                                  border_top_left_radius=0, border_bottom_left_radius=0,
                                  border_top_right_radius=cr, border_bottom_right_radius=cr)
         else:
@@ -1191,7 +1216,7 @@ class App:
             if dur > 0:
                 fw = int(W * el / dur)
                 if fw > 0:
-                    pygame.draw.rect(self.screen, COL_PROGRESS_FG, (0, y, fw, PROGRESS_H),
+                    pygame.draw.rect(self.screen, pfg, (0, y, fw, PROGRESS_H),
                                      border_top_left_radius=0, border_bottom_left_radius=0,
                                      border_top_right_radius=cr, border_bottom_right_radius=cr)
 
@@ -1284,6 +1309,8 @@ class App:
         self._album_y_t = float(H)
         self._ctrl_a    = 0.0
         self._ctrl_a_t  = 0.0
+        self._tl_bg_t   = COL_TL_BG
+        self._accent_t  = COL_HIGHLIGHT
         self._view     = View.GRID
 
     def _peek_to_grid(self):
@@ -1372,9 +1399,7 @@ class App:
             album["thumb"]         = None
             album["thumb_loading"] = False
         self._thumb_queued.clear()
-        self._thumbs_pending = len(self._albums)
-        for i in range(len(self._albums)):
-            self._queue_thumb(i)
+        self._thumbs_pending = 0
         self._cache_cleared_ms = pygame.time.get_ticks()
         self._dirty = True
 
@@ -1723,13 +1748,15 @@ class App:
                     rect(0, ty, W, TRACK_ROW_H)
 
         elif self._view == View.GRID:
+            _dbg_cell_h = _CELL_W + (GRID_TEXT_H if settings.get("grid_labels") else 0)
+            _dbg_row_h  = _dbg_cell_h + GRID_PAD
             for i in range(len(self._albums)):
                 row = i // GRID_COLS
                 c   = i % GRID_COLS
                 x   = GRID_PAD + c * (_CELL_W + GRID_PAD)
-                y   = GRID_PAD + row * _ROW_H - int(self._grid_scroll)
-                if y + _CELL_H > 0 and y < H:
-                    rect(x, y, _CELL_W, _CELL_H)
+                y   = GRID_PAD + row * _dbg_row_h - int(self._grid_scroll)
+                if y + _dbg_cell_h > 0 and y < H:
+                    rect(x, y, _CELL_W, _dbg_cell_h)
             if self._peeking:
                 rect(0, H - TRACKLIST_ART_H, W, TRACKLIST_ART_H)   # peek strip → unpeek
 
@@ -1739,8 +1766,9 @@ class App:
             pygame.gfxdraw.filled_circle(self.screen, tx, ty, 28, (255, 0, 0, 80))
             pygame.gfxdraw.aacircle(self.screen, tx, ty, 28, (255, 0, 0, 200))
 
-    def _draw_speaker_icon(self, cx, cy, r):
-        col = _BTN_ICON_COL
+    def _draw_speaker_icon(self, cx, cy, r, col=None):
+        if col is None:
+            col = _BTN_ICON_COL
         # speaker body (trapezoid)
         bw = max(2, r // 3)
         bh = max(2, r // 2)
@@ -1794,11 +1822,12 @@ class App:
                 pygame.gfxdraw.filled_circle(self.screen, dot_cx, dot_cy, dot_r, dot_col)
                 pygame.gfxdraw.aacircle(self.screen, dot_cx, dot_cy, dot_r, dot_col)
             if i < len(self._audio_sinks) - 1:
-                pygame.draw.aaline(self.screen, COL_SEP,
+                pygame.draw.line(self.screen, COL_SEP,
                                    (px, ry + row_h - 1), (px + pw, ry + row_h - 1))
 
-    def _draw_gear_icon(self, cx, cy, r):
-        col = _BTN_ICON_COL
+    def _draw_gear_icon(self, cx, cy, r, col=None, hole_col=COL_HIGHLIGHT):
+        if col is None:
+            col = _BTN_ICON_COL
         teeth, R_out = 8, r
         R_in = max(1, round(r * 0.68))
         hole = max(1, round(r * 0.38))
@@ -1812,8 +1841,8 @@ class App:
                 pts.append((cx + round(rad * math.cos(a)), cy + round(rad * math.sin(a))))
         pygame.gfxdraw.filled_polygon(self.screen, pts, col)
         pygame.gfxdraw.aapolygon(self.screen, pts, col)
-        pygame.gfxdraw.filled_circle(self.screen, cx, cy, hole, COL_HIGHLIGHT)
-        pygame.gfxdraw.aacircle(self.screen, cx, cy, hole, COL_HIGHLIGHT)
+        pygame.gfxdraw.filled_circle(self.screen, cx, cy, hole, hole_col)
+        pygame.gfxdraw.aacircle(self.screen, cx, cy, hole, hole_col)
 
     def _draw_toggle(self, x, y, on):
         pw, ph = TOGGLE_W, TOGGLE_H
@@ -1844,7 +1873,7 @@ class App:
         clip_h = H - PROGRESS_H - BTN_MARGIN * 2 - clip_y   # viewport stops well above scrub bar
         hdr = _render_text(self._f_title, "Settings", COL_TEXT_TITLE)
         self.screen.blit(hdr, ((W - hdr.get_width()) // 2, (sep_y - hdr.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
+        pygame.draw.line(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
 
         # compute total content height from row count (independent of scroll)
         bt_rows   = self._bt_row_count()
@@ -1869,7 +1898,7 @@ class App:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
                 self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, settings.get(key))
-            pygame.draw.aaline(self.screen, COL_SEP,
+            pygame.draw.line(self.screen, COL_SEP,
                                (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
 
@@ -1877,7 +1906,7 @@ class App:
             sh = _render_text(self._f_track_sm, "BLUETOOTH", COL_TEXT_ALBUM)
             self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
             self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, self._bt_powered)
-            pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+            pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
 
             if self._bt_powered:
@@ -1892,19 +1921,19 @@ class App:
                     dot_cy  = y + TRACK_ROW_H // 2
                     pygame.gfxdraw.filled_circle(self.screen, dot_x, dot_cy, dot_r, dot_col)
                     pygame.gfxdraw.aacircle(self.screen, dot_x, dot_cy, dot_r, dot_col)
-                    pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                    pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
                     y += TRACK_ROW_H
 
                 sc = _render_text(self._f_track, "Search for new devices", COL_HIGHLIGHT)
                 self.screen.blit(sc, (BTN_MARGIN, y + (TRACK_ROW_H - sc.get_height()) // 2))
-                pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
                 y += TRACK_ROW_H
 
         if self.wifi and self.wifi.available:
             sh = _render_text(self._f_track_sm, "WI-FI", COL_TEXT_ALBUM)
             self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
             self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, self._wifi_powered)
-            pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+            pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
             y += TRACK_ROW_H
 
             # signal bar geometry
@@ -1946,13 +1975,13 @@ class App:
                                     0, math.pi, max(1, lock_w // 8))
 
                 self.screen.blit(sl, (BTN_MARGIN, cy - sl.get_height() // 2))
-                pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+                pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
                 y += TRACK_ROW_H
 
         # ── SYSTEM ────────────────────────────────────────────────────────────
         sh = _render_text(self._f_track_sm, "SYSTEM", COL_TEXT_ALBUM)
         self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         now_ms = pygame.time.get_ticks()
@@ -1961,24 +1990,24 @@ class App:
         cc_col   = COL_TEXT_ALBUM if recently_cleared else COL_HIGHLIGHT
         cc = _render_text(self._f_track, cc_label, cc_col)
         self.screen.blit(cc, (BTN_MARGIN, y + (TRACK_ROW_H - cc.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         dbg_s = _render_text(self._f_track, "Debug mode", COL_TRACK_NORMAL)
         self.screen.blit(dbg_s, (BTN_MARGIN, y + (TRACK_ROW_H - dbg_s.get_height()) // 2))
         self._draw_toggle(W - BTN_MARGIN - TOGGLE_W, y + (TRACK_ROW_H - TOGGLE_H) // 2, settings.get("debug"))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         # ── TOUCH ─────────────────────────────────────────────────────────────
         sh = _render_text(self._f_track_sm, "TOUCH", COL_TEXT_ALBUM)
         self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         cal_s = _render_text(self._f_track, "Calibrate touch", COL_HIGHLIGHT)
         self.screen.blit(cal_s, (BTN_MARGIN, y + (TRACK_ROW_H - cal_s.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         is_default = (settings.get("cal_sx") == 1.0 and settings.get("cal_ox") == 0.0
@@ -1986,23 +2015,23 @@ class App:
         rst_col = COL_TEXT_ALBUM if is_default else COL_HIGHLIGHT
         rst_s   = _render_text(self._f_track, "Reset calibration", rst_col)
         self.screen.blit(rst_s, (BTN_MARGIN, y + (TRACK_ROW_H - rst_s.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         # ── POWER ─────────────────────────────────────────────────────────────
         sh = _render_text(self._f_track_sm, "POWER", COL_TEXT_ALBUM)
         self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         rb_s = _render_text(self._f_track, "Restart", (220, 160, 60))
         self.screen.blit(rb_s, (BTN_MARGIN, y + (TRACK_ROW_H - rb_s.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
         sd_s = _render_text(self._f_track, "Shut down", (220, 80, 80))
         self.screen.blit(sd_s, (BTN_MARGIN, y + (TRACK_ROW_H - sd_s.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
 
         self.screen.set_clip(old_clip)
         self._draw_progress()
@@ -2021,7 +2050,7 @@ class App:
         dots  = "." * (1 + (pygame.time.get_ticks() // 500) % 3)
         hdr   = _render_text(self._f_title, f"Scanning{dots}", COL_TEXT_TITLE)
         self.screen.blit(hdr, ((W - hdr.get_width()) // 2, (sep_y - hdr.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
+        pygame.draw.line(self.screen, COL_SEP, (0, sep_y), (W, sep_y))
 
         y = sep_y
         if not self._scan_devices:
@@ -2035,7 +2064,7 @@ class App:
                 label = "Pairing…" if busy else dev["name"]
                 sl    = _render_text(self._f_track, label, col)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
-                pygame.draw.aaline(self.screen, COL_SEP,
+                pygame.draw.line(self.screen, COL_SEP,
                                    (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
                 y += TRACK_ROW_H
 
@@ -2257,7 +2286,7 @@ class App:
         name = _render_text(self._f_track_sm, dev["name"], COL_TEXT_ALBUM, pw - BTN_MARGIN * 2)
         self.screen.blit(name, (px + (pw - name.get_width()) // 2,
                                 sy + (TRACK_ROW_H - name.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (px, sy + TRACK_ROW_H - 1), (px + pw, sy + TRACK_ROW_H - 1))
         sy += TRACK_ROW_H
 
@@ -2266,7 +2295,7 @@ class App:
         s1 = _render_text(self._f_track, action1, COL_TRACK_NORMAL)
         self.screen.blit(s1, (px + (pw - s1.get_width()) // 2,
                                sy + (TRACK_ROW_H - s1.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (px, sy + TRACK_ROW_H - 1), (px + pw, sy + TRACK_ROW_H - 1))
         sy += TRACK_ROW_H
 
@@ -2337,7 +2366,7 @@ class App:
         name = _render_text(self._f_track_sm, net["name"], COL_TEXT_ALBUM, pw - BTN_MARGIN * 2)
         self.screen.blit(name, (px + (pw - name.get_width()) // 2,
                                 sy + (TRACK_ROW_H - name.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (px, sy + TRACK_ROW_H - 1), (px + pw, sy + TRACK_ROW_H - 1))
         sy += TRACK_ROW_H
 
@@ -2345,7 +2374,7 @@ class App:
         s1 = _render_text(self._f_track, action1, COL_TRACK_NORMAL)
         self.screen.blit(s1, (px + (pw - s1.get_width()) // 2,
                                sy + (TRACK_ROW_H - s1.get_height()) // 2))
-        pygame.draw.aaline(self.screen, COL_SEP,
+        pygame.draw.line(self.screen, COL_SEP,
                            (px, sy + TRACK_ROW_H - 1), (px + pw, sy + TRACK_ROW_H - 1))
         sy += TRACK_ROW_H
 
@@ -2358,7 +2387,7 @@ class App:
             s2 = _render_text(self._f_track, "Enter password", COL_TRACK_NORMAL)
             self.screen.blit(s2, (px + (pw - s2.get_width()) // 2,
                                    sy + (TRACK_ROW_H - s2.get_height()) // 2))
-            pygame.draw.aaline(self.screen, COL_SEP,
+            pygame.draw.line(self.screen, COL_SEP,
                                (px, sy + TRACK_ROW_H - 1), (px + pw, sy + TRACK_ROW_H - 1))
             sy += TRACK_ROW_H
             s3 = _render_text(self._f_track, "Forget network", (200, 80, 80))
@@ -2435,9 +2464,12 @@ class App:
         gt    = 0
         if y < gt:
             return None
+        show_labels = settings.get("grid_labels")
+        cell_h = _CELL_W + (GRID_TEXT_H if show_labels else 0)
+        row_h  = cell_h + GRID_PAD
         gy    = y - gt + int(self._grid_scroll)
-        row   = (gy - GRID_PAD) // _ROW_H
-        if row < 0 or (gy - GRID_PAD) % _ROW_H > _CELL_H:
+        row   = (gy - GRID_PAD) // row_h
+        if row < 0 or (gy - GRID_PAD) % row_h > cell_h:
             return None
         col   = (x - GRID_PAD) // (_CELL_W + GRID_PAD)
         if col < 0 or col >= GRID_COLS:
