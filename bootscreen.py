@@ -12,6 +12,7 @@ import math
 import mmap
 import os
 import signal
+import socket
 import struct
 import time
 
@@ -19,6 +20,19 @@ FBIOGET_VSCREENINFO = 0x4600
 FBIOPUT_VSCREENINFO = 0x4601
 
 READY_FLAG   = "/tmp/album2.ready"
+
+
+def _sd_ready():
+    """Tell systemd the service is ready (Type=notify) after first frame is drawn."""
+    sock = os.environ.get("NOTIFY_SOCKET", "")
+    if not sock:
+        return
+    try:
+        addr = "\0" + sock[1:] if sock.startswith("@") else sock
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.sendto(b"READY=1\n", addr)
+    except Exception:
+        pass
 CACHE_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bootscreen_cache")
 CACHE_MAGIC  = 0xAB2C0001
 
@@ -172,6 +186,7 @@ def main():
     head      = 0
     interval  = 1.0 / FPS
     next_tick = time.monotonic()
+    first     = True
 
     while running and not os.path.exists(READY_FLAG):
         # Restore previous dot pixels to background in the local frame buffer.
@@ -188,6 +203,10 @@ def main():
         # Single write covers any console text drawn since last tick.
         buf.seek(0)
         buf.write(frame)
+        if first:
+            # Notify systemd (Type=notify) — getty won't start until after this.
+            _sd_ready()
+            first = False
         next_tick += interval
         delay = next_tick - time.monotonic()
         if delay > 0:

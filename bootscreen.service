@@ -5,7 +5,9 @@ After=local-fs.target
 Before=album2.service getty@tty1.service
 
 [Service]
-# Clear the framebuffer to black and suppress console output before Python starts.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30
 ExecStartPre=+/bin/sh -c 'cat /dev/zero > /dev/fb0 2>/dev/null; echo 1 4 1 7 > /proc/sys/kernel/printk; for b in /sys/class/vtconsole/vtcon*/bind; do echo 0 > "$b" 2>/dev/null; done; true'
 User=pi
 ExecStart=/home/pi/album2/venv/bin/python /home/pi/album2/bootscreen.py
