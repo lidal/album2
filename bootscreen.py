@@ -44,14 +44,18 @@ def _open_fb(device="/dev/fb0", target_w=720, target_h=720):
             pass  # DRM-backed fbdev (e.g. vc4drmfb) may not support resolution changes
         vinfo = bytearray(fcntl.ioctl(f, FBIOGET_VSCREENINFO, bytes(160)))
         w, h  = struct.unpack_from("II", vinfo, 0)
+        bpp   = struct.unpack_from("I",  vinfo, 24)[0]
     r_off = struct.unpack_from("I", vinfo, 32)[0]
     b_off = struct.unpack_from("I", vinfo, 56)[0]
     bgra  = r_off > b_off
-    buf   = mmap.mmap(f.fileno(), w * h * 4)
-    return f, buf, w, h, bgra
+    buf   = mmap.mmap(f.fileno(), w * h * (bpp // 8))
+    return f, buf, w, h, bpp, bgra
 
 
-def _px(r, g, b, bgra):
+def _px(r, g, b, bpp, bgra):
+    if bpp == 16:
+        v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        return struct.pack("<H", v)
     return bytes([b, g, r, 255]) if bgra else bytes([r, g, b, 255])
 
 
@@ -124,11 +128,12 @@ def main():
         pass
 
     try:
-        f, buf, w, h, bgra = _open_fb()
+        f, buf, w, h, bpp, bgra = _open_fb()
     except Exception as exc:
         print(f"bootscreen: {exc}", flush=True)
         return
 
+    stride = bpp // 8
     spoke_r = min(w, h) // 10
     dot_r   = max(4, spoke_r // 5)
 
@@ -139,7 +144,7 @@ def main():
 
     # Fill framebuffer with background colour once
     buf.seek(0)
-    buf.write(_px(*BG, bgra) * (w * h))
+    buf.write(_px(*BG, bpp, bgra) * (w * h))
 
     running = True
 
@@ -159,9 +164,9 @@ def main():
         for i in range(N_DOTS):
             dist = (head - i) % N_DOTS
             bri  = max(35, 255 - dist * 18)
-            px   = _px(bri, bri, bri, bgra)
+            px   = _px(bri, bri, bri, bpp, bgra)
             for idx in dot_pixels[i]:
-                buf[idx * 4: idx * 4 + 4] = px
+                buf[idx * stride: idx * stride + stride] = px
         head      = (head + 1) % N_DOTS
         next_tick += interval
         delay = next_tick - time.monotonic()

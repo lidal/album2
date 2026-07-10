@@ -1,0 +1,15 @@
+[Unit]
+Description=Album2 boot screen
+DefaultDependencies=no
+Requires=dev-fb0.device
+After=dev-fb0.device
+Before=album2.service getty@tty1.service
+
+[Service]
+User=pi
+ExecStart=/home/pi/album2/venv/bin/python /home/pi/album2/bootscreen.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
