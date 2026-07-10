@@ -126,7 +126,6 @@ class Framebuffer:
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
         if self.bpp == 32:
-            import numpy as np
             arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
             if rotate == 180:
                 data = arr[::-1, ::-1].T.tobytes()
@@ -150,20 +149,22 @@ class Framebuffer:
         # slices are 518 KB uint8 arrays — 4× smaller than uint32 ops, and avoids
         # the 22ms overhead of pixels3d which does internal format conversion.
         arr = pygame.surfarray.pixels2d(surface)
-        arr8 = arr.view(np.uint8).reshape(self.width, self.height, 4)
+        # pixels2d returns (W,H) F-contiguous (surface memory is row-major (H,W)).
+        # .T gives (H,W) C-contiguous, so .view(uint8) works without copying.
+        arr8 = arr.T.view(np.uint8).reshape(self.height, self.width, 4)
         if self._rgb565_argb is None:
             # ARGB/XRGB surface: rmask=0x00FF0000 → memory bytes are [B,G,R,A]
             # RGBA/RGBX surface: rmask=0xFF000000 → memory bytes are [R,G,B,A]
             self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
         r_i, g_i, b_i = (2, 1, 0) if self._rgb565_argb else (0, 1, 2)
-        # Build RGB565 with in-place shifts on uint16 slices to minimise allocations
+        # Build RGB565 in (H,W) order — tobytes() produces row-major framebuffer data directly.
         rgb565 = arr8[:, :, r_i].astype(np.uint16); rgb565 >>= 3; rgb565 <<= 11
         g = arr8[:, :, g_i].astype(np.uint16);      g >>= 2;      g <<= 5; rgb565 |= g
         b = arr8[:, :, b_i].astype(np.uint16);      b >>= 3;               rgb565 |= b
         del arr, arr8, g, b
         if rotate_180:
-            return rgb565[::-1, ::-1].T.tobytes()
-        return rgb565.T.tobytes()
+            return rgb565[::-1, ::-1].tobytes()
+        return rgb565.tobytes()
 
     def close(self) -> None:
         self._q.put(None)  # signal writer to exit
