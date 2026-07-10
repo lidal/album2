@@ -2,41 +2,52 @@
 # album2 install script — run as the pi user, not root
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV="$SCRIPT_DIR/venv"
+VENV_PYTHON="$VENV/bin/python"
+USER="$(whoami)"
+
 echo "=== album2 install ==="
+echo "User: $USER  Dir: $SCRIPT_DIR"
 
 # ── System packages ────────────────────────────────────────────────────────────
 sudo apt-get update -q
-sudo apt-get install -y \
-    python3-pip python3-venv python3-pygame \
-    libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+sudo apt-get install -y --no-install-recommends \
+    python3-pip python3-venv \
+    libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev \
     libjpeg-dev zlib1g-dev libfreetype6-dev \
-    python3-smbus i2c-tools \
-    bluez \
-    mopidy mopidy-local
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+    bluez git
 
-# ── Mopidy extensions ─────────────────────────────────────────────────────────
-sudo pip3 install \
-    Mopidy-MPD \
-    Mopidy-HTTP \
-    Mopidy-Local
-
-# ── Python venv for album2 ────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ── Python venv (mopidy + album2 deps together) ───────────────────────────────
 cd "$SCRIPT_DIR"
-
-python3 -m venv --system-site-packages venv
+if [ ! -f "$VENV/bin/activate" ]; then
+    python3 -m venv "$VENV"
+fi
 # shellcheck disable=SC1091
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+source "$VENV/bin/activate"
+pip install --upgrade pip --quiet
+pip install --quiet \
+    "mopidy>=4.0" \
+    "mopidy-local>=4.0" \
+    "mopidy-mpd>=4.0"
+pip install --quiet -r requirements.txt
 
-# ── Mopidy config hint ────────────────────────────────────────────────────────
-if [ ! -f "$HOME/.config/mopidy/mopidy.conf" ]; then
-    echo ""
-    echo "=== Mopidy configuration ==="
-    echo "No mopidy.conf found. Create one at ~/.config/mopidy/mopidy.conf:"
-    echo ""
-    cat << 'CONF'
+# ── Mopidy config ─────────────────────────────────────────────────────────────
+MOPIDY_CONF="$HOME/.config/mopidy/mopidy.conf"
+if [ ! -f "$MOPIDY_CONF" ]; then
+    mkdir -p "$(dirname "$MOPIDY_CONF")"
+    cat > "$MOPIDY_CONF" << 'CONF'
+[core]
+restore_state = true
+
+[logging]
+verbosity = 0
+color = false
+
+[audio]
+output = autoaudiosink
+
 [mpd]
 enabled = true
 hostname = 127.0.0.1
@@ -51,40 +62,60 @@ port = 6680
 enabled = true
 media_dir = ~/Music
 
-[audio]
-# find your DAC card name with:  aplay -l
-output = alsasink device=hw:CARD=KA3,DEV=0
+[file]
+enabled = false
+
+[stream]
+enabled = false
 CONF
+    echo "Wrote default mopidy.conf — edit audio.output for your DAC"
 fi
 
-# ── Sudoers rule for shutdown/reboot (used by the in-app buttons) ─────────────
+# ── Sudoers rule for shutdown/reboot ──────────────────────────────────────────
 SUDOERS_FILE="/etc/sudoers.d/album2"
 sudo tee "$SUDOERS_FILE" > /dev/null << SUDOERS
-$USERNAME ALL=(ALL) NOPASSWD: /sbin/reboot, /sbin/shutdown
+$USER ALL=(ALL) NOPASSWD: /sbin/reboot, /sbin/shutdown
 SUDOERS
 sudo chmod 0440 "$SUDOERS_FILE"
-echo "Sudoers rule written to $SUDOERS_FILE"
 
 # ── Group membership (framebuffer + input device access) ──────────────────────
-sudo usermod -aG video,input "$USERNAME"
-echo "Added $USERNAME to video and input groups (re-login required)"
+sudo usermod -aG video,input "$USER"
 
-# ── Enable Mopidy service ─────────────────────────────────────────────────────
-sudo systemctl enable mopidy
+# ── Enable linger so /run/user/$UID exists without a login session ────────────
+loginctl enable-linger "$USER"
 
-# ── Autostart via systemd (framebuffer, no desktop) ───────────────────────────
-UNIT_FILE="/etc/systemd/system/album2.service"
-VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
+# ── Systemd service files ─────────────────────────────────────────────────────
+UID_NUM="$(id -u)"
 
-sudo tee "$UNIT_FILE" > /dev/null << UNIT
+sudo tee /etc/systemd/system/mopidy.service > /dev/null << UNIT
+[Unit]
+Description=Mopidy music server
+After=network.target sound.target
+
+[Service]
+User=$USER
+ExecStart=$VENV_PYTHON -m mopidy
+Restart=on-failure
+RestartSec=5
+Environment=HOME=$HOME
+Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
+Environment=PULSE_SERVER=unix:/run/user/$UID_NUM/pulse/native
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo tee /etc/systemd/system/album2.service > /dev/null << UNIT
 [Unit]
 Description=Album2 music player
 After=network.target mopidy.service
 Wants=mopidy.service
 
 [Service]
-User=$USERNAME
+User=$USER
 WorkingDirectory=$SCRIPT_DIR
+Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
+Environment=PULSE_SERVER=unix:/run/user/$UID_NUM/pulse/native
 ExecStart=$VENV_PYTHON $SCRIPT_DIR/main.py
 Restart=on-failure
 RestartSec=5
@@ -95,13 +126,30 @@ StandardError=journal
 WantedBy=multi-user.target
 UNIT
 
+sudo tee /etc/systemd/system/bootscreen.service > /dev/null << UNIT
+[Unit]
+Description=Album2 boot screen
+DefaultDependencies=no
+After=local-fs.target
+Before=album2.service
+
+[Service]
+User=$USER
+ExecStart=$VENV_PYTHON $SCRIPT_DIR/bootscreen.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=basic.target
+UNIT
+
 sudo systemctl daemon-reload
-sudo systemctl enable album2.service
+sudo systemctl enable mopidy.service album2.service bootscreen.service
 
 echo ""
 echo "=== Done ==="
-echo "If mopidy.conf is new, edit it then run:  mopidy local scan"
-echo "Start manually:  sudo systemctl start album2"
+echo "Add music to ~/Music, then run:  $VENV_PYTHON -m mopidy local scan"
+echo "Start services:  sudo systemctl start mopidy album2"
+echo "Boot screen:     sudo systemctl start bootscreen"
 echo "View logs:       journalctl -u album2 -f"
-echo "Check I2C:       i2cdetect -y 11"
-echo "List audio:      aplay -l"
+echo "Reboot to test full boot sequence."
