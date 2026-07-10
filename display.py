@@ -901,8 +901,6 @@ class App:
         # ── layer 1: grid (when album is off-screen or peeking above) ───────────
         if ay > 2 or self._peeking:
             self._draw_grid()
-        else:
-            self.screen.fill(COL_GRID_BG)
 
         # ── layer 2: tracklist (drawn behind album art so art slides over it) ─
         if ay < -2 and not self._peeking:
@@ -998,9 +996,6 @@ class App:
             self._draw_spinner(W // 2, ay + H // 2)
             return
         art = self._art or self._default_bg
-        # SDL2 maps set_alpha(255) → plain byte-copy (no NEON, ~8× slower on
-        # Cortex-A53). Using 254 keeps the NEON alpha-blend path active.
-        art.set_alpha(254)
         self.screen.blit(art, (0, ay))
 
     def _draw_spinner(self, cx: int, cy: int):

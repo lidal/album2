@@ -68,6 +68,7 @@ class Framebuffer:
         self.bpp            = bpp
         self._fmt           = "BGRA" if r_off > b_off else "RGBA"
         self._vinfo         = vinfo   # kept for FBIOPAN_DISPLAY calls
+        self._rgb565_argb: bool | None = None  # cached surface format for _to_rgb565
 
         # Try to enable double buffering: allocate yres_virtual = 2*yres so we
         # can write to the hidden buffer and flip atomically, eliminating tearing.
@@ -120,28 +121,20 @@ class Framebuffer:
                 self._map.write(data)
 
     def flip(self, surface: pygame.Surface, rotate: int = 0) -> None:
-        """Blit surface to the framebuffer, optionally rotating 0/90/180/270 degrees.
-
-        180° is handled in numpy (zero extra Surface allocation).
-        Other angles fall back to pygame.transform.rotate.
-        """
         if rotate in (90, 270):
             surface = pygame.transform.rotate(surface, rotate)
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
         if self.bpp == 32:
-            data = pygame.image.tostring(surface, self._fmt)
+            import numpy as np
+            arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
             if rotate == 180:
-                import numpy as np
-                # Reverse pixel order in-place (each 4-byte BGRA group treated as uint32).
-                # This is equivalent to pygame.transform.rotate(surf, 180) but avoids
-                # allocating a new Surface — the numpy view is zero-copy until .tobytes().
-                data = np.frombuffer(data, dtype=np.uint32)[::-1].tobytes()
+                data = arr[::-1, ::-1].T.tobytes()
+            else:
+                data = arr.T.tobytes()
+            del arr
         elif self.bpp == 16:
-            data = self._to_rgb565(surface)
-            if rotate == 180:
-                import numpy as np
-                data = np.frombuffer(data, dtype=np.uint16)[::-1].tobytes()
+            data = self._to_rgb565(surface, rotate == 180)
         else:
             raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
         # Drop the oldest pending frame if the writer is still busy (maxsize=1).
@@ -151,14 +144,23 @@ class Framebuffer:
             pass
         self._q.put(data)
 
-    def _to_rgb565(self, surface: pygame.Surface) -> bytes:
+    def _to_rgb565(self, surface: pygame.Surface, rotate_180: bool = False) -> bytes:
         import numpy as np
-        arr = pygame.surfarray.pixels3d(surface)   # (W, H, 3) col-major RGB
-        r   = arr[:, :, 0].astype(np.uint16)
-        g   = arr[:, :, 1].astype(np.uint16)
-        b   = arr[:, :, 2].astype(np.uint16)
-        rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-        return rgb565.T.astype("<u2").tobytes()    # row-major little-endian
+        arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
+        # Detect channel layout once from the surface's red-channel mask:
+        #   ARGB/XRGB (rmask=0x00FF0000): R at bits 23-16, G at 15-8, B at 7-0
+        #   RGBA/RGBX (rmask=0xFF000000): R at bits 31-24, G at 23-16, B at 15-8
+        if self._rgb565_argb is None:
+            self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
+        if self._rgb565_argb:
+            out = ((arr >> 8) & np.uint32(0xF800)) | ((arr >> 5) & np.uint32(0x07E0)) | ((arr >> 3) & np.uint32(0x1F))
+        else:
+            out = ((arr << 8) & np.uint32(0xF800)) | ((arr >> 5) & np.uint32(0x07E0)) | ((arr >> 19) & np.uint32(0x1F))
+        del arr
+        out16 = out.astype(np.uint16)
+        if rotate_180:
+            return out16[::-1, ::-1].T.tobytes()
+        return out16.T.tobytes()
 
     def close(self) -> None:
         self._q.put(None)  # signal writer to exit
