@@ -10,7 +10,7 @@ _ANSI_RE   = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
 _DEVICE_RE = re.compile(
     r"\[(NEW|CHG|DEL)\]\s+Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*(.*)"
 )
-_MAC_RE    = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+_MAC_RE    = re.compile(r"^[0-9A-Fa-f]{2}(?:[:\-][0-9A-Fa-f]{2}){5}$")
 
 
 def _run(*args, timeout=5) -> str:
