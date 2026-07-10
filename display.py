@@ -97,15 +97,16 @@ _CELL_H      = _CELL_W + GRID_TEXT_H
 _ROW_H       = _CELL_H + GRID_PAD
 
 # carousel geometry
-_CAR_SIZE         = 350   # all albums same height (px) — no scaling with distance
-_CAR_COMP         = 0.20  # width factor for fully-rotated (d≥1) side album ≈ cos(78°)
-_CAR_CY           = 250   # y-centre of album strip
-_CAR_PX_PER_ALBUM = 220   # px of horizontal drag = 1 album step
-_CAR_REFL_H       = 90    # reflection strip height below each album
-# x-centre offsets from W//2 for albums at integer distances 0, 1, 2.
-# Side album width = _CAR_SIZE * _CAR_COMP ≈ 70 px; stacked with an 8 px gap
-# so ~2 side albums appear fully on each side of centre.
-_CAR_AX           = (0, 218, 296)
+_CAR_SIZE         = 350    # all albums same height (px)
+_CAR_COMP         = 0.20   # cos(78°) — compressed width for fully-rotated side album
+_CAR_CY           = 250    # y-centre of all albums
+_CAR_PX_PER_ALBUM = 220    # px of horizontal drag = 1 album step
+_CAR_REFL_H       = 90     # reflection strip height below each album
+_CAR_CAM_D        = 1500   # virtual camera distance (px) — controls perspective depth
+_CAR_PERSP_N      = 4      # vertical strips for trapezoidal perspective simulation
+# x-centre offsets from W//2 at integer distances 0, 1, 2.
+# Near edge of side albums overlaps behind the centre album by ~30 px.
+_CAR_AX           = (0, 180, 235)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -1036,30 +1037,36 @@ class App:
         def _slot(d: float):
             a        = abs(d)
             t        = min(a, 1.0)
-            # Full width at centre; shrinks to _CAR_COMP at |d| ≥ 1.
-            # Same height for all albums — compression = horizontal squish only.
             compress = max(_CAR_COMP, 1.0 - (1.0 - _CAR_COMP) * t)
             w        = max(4, int(_CAR_SIZE * compress))
-            n_ax     = len(_CAR_AX)
+            # Perspective: near edge taller, far edge shorter (trapezoid shape)
+            sin_th   = math.sqrt(max(0.0, 1.0 - compress * compress))
+            half_z   = sin_th * _CAR_SIZE * 0.5
+            if half_z > 1.0:
+                near_h = int(_CAR_SIZE * _CAR_CAM_D / max(1.0, _CAR_CAM_D - half_z))
+                far_h  = int(_CAR_SIZE * _CAR_CAM_D / (_CAR_CAM_D + half_z))
+            else:
+                near_h = far_h = _CAR_SIZE
             ai, af   = int(a), a - int(a)
+            n_ax     = len(_CAR_AX)
             if ai < n_ax - 1:
                 x_off = _CAR_AX[ai] + (_CAR_AX[ai + 1] - _CAR_AX[ai]) * af
             else:
                 x_off = _CAR_AX[-1] + (_CAR_AX[-1] - _CAR_AX[-2]) * (a - n_ax + 1)
             x     = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
             alpha = max(0, int(255 * max(0.0, 1.0 - 0.32 * a)))
-            return x, _CAR_CY, w, _CAR_SIZE, alpha, compress
+            return x, _CAR_CY, w, near_h, far_h, alpha, compress
 
-        # Furthest first so nearer albums blit on top.
+        # Furthest albums first → nearer ones blit on top (correct depth order).
         visible = []
         for i in range(n):
             d = i - pos
             if abs(d) < 2.4:
-                x, y, w, h, alpha, compress = _slot(d)
-                visible.append((abs(d), d, i, x, y, w, h, alpha, compress))
+                x, y, w, near_h, far_h, alpha, compress = _slot(d)
+                visible.append((abs(d), d, i, x, y, w, near_h, far_h, alpha, compress))
         visible.sort(key=lambda v: v[0], reverse=True)
 
-        # Lazy-build reflection fade mask once (COL_BG, transparent→opaque top→bottom).
+        # Lazy-build reflection fade mask (transparent → COL_BG, top → bottom).
         if not hasattr(self, "_refl_fade") or self._refl_fade is None:
             fade = pygame.Surface((W, _CAR_REFL_H), pygame.SRCALPHA)
             r, g, b = COL_BG
@@ -1068,51 +1075,83 @@ class App:
                 pygame.draw.line(fade, (r, g, b, a), (0, yi), (W - 1, yi))
             self._refl_fade = fade
 
-        # Pass 1 — build surfaces + draw reflections (far→near so reflections
-        #           also stack correctly before the fade mask covers them).
+        # Pass 1 — render each album surface + draw reflection below it.
         surfs = []
-        for _, d, i, x, y, w, h, alpha, compress in visible:
+        for _, d, i, x, y, w, near_h, far_h, alpha, compress in visible:
             self._queue_thumb(i)
-            thumb = self._albums[i].get("thumb")
+            thumb  = self._albums[i].get("thumb")
+            max_h  = max(near_h, far_h)
+
             if thumb:
-                surf = pygame.transform.smoothscale(thumb, (w, h))
+                tw, th = thumb.get_size()
+                if near_h == far_h:
+                    # Centre album: plain scale, no perspective distortion.
+                    surf = pygame.Surface((w, near_h))
+                    surf.fill(COL_BG)
+                    surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
+                else:
+                    # Side album: render as _CAR_PERSP_N vertical strips, each with
+                    # a different height to create a trapezoidal perspective shape.
+                    # Near edge is taller; far edge is shorter.
+                    surf       = pygame.Surface((w, max_h))
+                    surf.fill(COL_BG)
+                    N          = _CAR_PERSP_N
+                    shadow_max = int(130 * (1.0 - compress))
+                    for col in range(N):
+                        # t_persp=0 at near edge, 1 at far edge
+                        t_persp = (col / (N - 1)) if d > 0 else ((N - 1 - col) / (N - 1))
+                        col_h   = max(1, int(near_h + (far_h - near_h) * t_persp))
+                        dst_y   = (max_h - col_h) // 2   # centre strip vertically
+                        src_x   = int(col * tw / N)
+                        src_w   = max(1, int((col + 1) * tw / N) - src_x)
+                        dst_x   = int(col * w / N)
+                        dst_w   = max(1, int((col + 1) * w / N) - dst_x)
+                        strip   = pygame.transform.smoothscale(
+                                      thumb.subsurface((src_x, 0, src_w, th)),
+                                      (dst_w, col_h))
+                        # Directional shadow — darkest at the far edge
+                        shadow_a = int(shadow_max * t_persp)
+                        if shadow_a > 0:
+                            dark = pygame.Surface((dst_w, col_h))
+                            dark.fill((0, 0, 0))
+                            dark.set_alpha(shadow_a)
+                            strip.blit(dark, (0, 0))
+                        surf.blit(strip, (dst_x, dst_y))
             else:
-                surf = pygame.Surface((w, h))
+                surf = pygame.Surface((w, max_h))
                 surf.fill(COL_CELL_BG)
 
-            # Directional shadow: dark overlay on the far side of each rotated album.
-            # Gives depth cue that makes the squish read as perspective rotation.
-            if abs(d) > 0.05:
-                shadow_a  = int(140 * (1.0 - compress))  # stronger when more rotated
-                sw        = max(1, w // 2)
-                shadow    = pygame.Surface((sw, h), pygame.SRCALPHA)
-                shadow.fill((0, 0, 0, shadow_a))
-                shadow_x  = w - sw if d > 0 else 0   # right-half for right albums, left for left
-                surf.blit(shadow, (shadow_x, 0))
-
-            # Reflection below album
+            # Reflection: flip, scale to strip height, dim by distance alpha.
             refl = pygame.transform.smoothscale(
                 pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
-            refl.set_alpha(max(0, int(70 * alpha / 255)))
-            self.screen.blit(refl, (x - w // 2, y + h // 2 + 2))
-            surfs.append((surf, alpha, x, y, w, h))
+            refl.set_alpha(max(0, int(65 * alpha / 255)))
+            self.screen.blit(refl, (x - w // 2, _CAR_CY + _CAR_SIZE // 2 + 2))
+            surfs.append((surf, alpha, x, y, max_h))
 
-        # Fade mask wipes the reflection strip bottom-to-transparent.
+        # Fade mask over the full reflection row.
         self.screen.blit(self._refl_fade, (0, _CAR_CY + _CAR_SIZE // 2 + 2))
 
-        # Pass 2 — draw album bodies (same far→near order; near ends up on top).
-        for surf, alpha, x, y, w, h in surfs:
+        # Pass 2 — album bodies, same far→near order so near albums sit on top.
+        for surf, alpha, x, y, max_h in surfs:
             if alpha < 255:
                 surf.set_alpha(alpha)
-            self.screen.blit(surf, (x - w // 2, y - h // 2))
+            self.screen.blit(surf, (x - surf.get_width() // 2, y - max_h // 2))
 
-        # Name + artist below centre album (below reflection strip)
+        # Name + artist centred below the album strip.
         c   = self._albums[center_idx]
         ty  = _CAR_CY + _CAR_SIZE // 2 + _CAR_REFL_H + 18
         ns  = _render_text(self._f_title,  c.get("name",   ""), COL_TEXT_TITLE,  W - 80)
         as_ = _render_text(self._f_artist, c.get("artist", ""), COL_TEXT_ARTIST, W - 80)
         self.screen.blit(ns,  ((W - ns.get_width())  // 2, ty))
         self.screen.blit(as_, ((W - as_.get_width()) // 2, ty + ns.get_height() + 6))
+
+        # Settings gear button (same position as in controls overlay, reuses _gear_btn_hit).
+        gx = W - BTN_RADIUS - BTN_MARGIN - 2 * BTN_RADIUS - BTN_GAP
+        gy = BTN_MARGIN + BTN_RADIUS
+        pygame.gfxdraw.filled_circle(self.screen, gx, gy, BTN_RADIUS, (38, 38, 42))
+        pygame.gfxdraw.aacircle(self.screen, gx, gy, BTN_RADIUS, (60, 60, 65))
+        self._draw_gear_icon(gx, gy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12),
+                             col=(200, 200, 200), hole_col=(38, 38, 42))
 
     # ── draw: album panel ─────────────────────────────────────────────────────
 
@@ -2764,6 +2803,12 @@ class App:
         view = self._view
 
         if view == View.CAROUSEL:
+            if self._peeking and pos[1] >= H - TRACKLIST_ART_H:
+                self._unpeek()
+                return
+            if self._gear_btn_hit(pos):
+                self._open_settings()
+                return
             n = len(self._albums)
             if n > 0:
                 idx = max(0, min(n - 1, int(round(self._carousel_pos))))
@@ -3039,7 +3084,9 @@ class App:
 
     def _is_panel_touch(self, pos) -> bool:
         """True if pos lands on the currently visible part of the album panel."""
-        if self._view in (View.SETTINGS, View.SCAN, View.CALIBRATE, View.CAROUSEL):
+        if self._view in (View.SETTINGS, View.SCAN, View.CALIBRATE):
+            return False
+        if self._view == View.CAROUSEL and not self._peeking:
             return False
         ay = self._album_y
         if ay >= H - 2:
@@ -3446,6 +3493,12 @@ class App:
             # horizontal swipe on album art bypasses panel snap
             if self._panel_touch and self._t_dragging and not (swipe_h and self._view == View.ALBUM):
                 self._snap_panel(total_y)
+                # Also snap carousel position if the drag may have scrolled it
+                if self._view == View.CAROUSEL:
+                    n = len(self._albums)
+                    if n > 0:
+                        self._carousel_pos_t = float(
+                            max(0, min(n - 1, round(self._carousel_pos))))
             else:
                 is_tap  = (not self._t_dragging
                             and abs(total_x) < TAP_MAX_MOVE
