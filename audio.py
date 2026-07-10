@@ -50,21 +50,22 @@ class AudioOutputManager:
     def _sinks_wpctl(self) -> list[dict]:
         out = _run("wpctl", "status")
         sinks = []
-        in_sinks = False
+        in_audio_sinks = False
         for line in out.splitlines():
-            if "Sinks:" in line:
-                in_sinks = True
+            # Only care about the Audio section's Sinks — stop at Sources/Filters/Streams
+            if re.search(r"^\s*[├└│].*Sinks:", line) and "Video" not in line:
+                in_audio_sinks = True
                 continue
-            if in_sinks:
-                if line.strip() == "" or (line[0] != " " and ":" in line):
+            if in_audio_sinks:
+                if re.search(r"Sources:|Filters:|Streams:|^[A-Z]", line):
                     break
-                # e.g. "  *   53. Built-in Audio Analog Stereo [vol: 0.40]"
-                m = re.match(r"\s+(\*?)\s*(\d+)\.\s+(.+?)\s*(?:\[|$)", line)
+                m = re.match(r"[\s│├└─]*(\*?)\s+(\d+)\.\s+(.+?)\s*(?:\[|$)", line)
                 if m:
                     active = bool(m.group(1))
                     sid    = m.group(2)
                     name   = m.group(3).strip()
-                    sinks.append({"id": sid, "name": name, "active": active})
+                    if name and name != "Dummy Output":
+                        sinks.append({"id": sid, "name": name, "active": active})
         return sinks
 
     def _sinks_pactl(self) -> list[dict]:
