@@ -97,13 +97,15 @@ _CELL_H      = _CELL_W + GRID_TEXT_H
 _ROW_H       = _CELL_H + GRID_PAD
 
 # carousel geometry
-_CAR_SIZE         = 350   # center album square size (px)
-_CAR_CY           = 285   # y-center of the album strip
+_CAR_SIZE         = 350   # all albums same height (px) — no scaling with distance
+_CAR_COMP         = 0.22  # width factor for fully-rotated (d≥1) side album ≈ cos(77°)
+_CAR_CY           = 250   # y-centre of album strip
 _CAR_PX_PER_ALBUM = 220   # px of horizontal drag = 1 album step
-# x-centre offsets from W//2 for albums at distance 0, 1, 2, 3, 4 from centre.
-# Built from near-edge stacking: each side album's left edge is just right of
-# the previous one's right edge, so 3 albums are fully visible on each side.
-_CAR_AX           = (0, 215, 278, 334, 395)
+_CAR_REFL_H       = 90    # reflection strip height below each album
+# x-centre offsets from W//2 for albums at integer distances 0,1,2,3,4.
+# Side albums are _CAR_SIZE * _CAR_COMP wide; successive ones are stacked with a
+# 3 px gap so 3 albums appear fully on each side of centre.
+_CAR_AX           = (0, 223, 302, 381, 460)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -893,8 +895,9 @@ class App:
         if not self._dirty and settings.get("skip_draw") and not settings.get("debug") and not kb_active:
             return False
         self._dirty = False
-        if self._view == View.CAROUSEL:
+        if self._view == View.CAROUSEL and self._album_y >= H - 1:
             self._draw_carousel()
+            self._draw_progress()
             self._draw_volume_badge()
             if settings.get("debug"):
                 self._draw_debug_overlays()
@@ -1025,65 +1028,94 @@ class App:
         if not n:
             msg = _render_text(self._f_artist, "Loading library…", COL_TEXT_ALBUM)
             self.screen.blit(msg, ((W - msg.get_width()) // 2, H // 2))
-            self._draw_progress()
             return
 
         pos = self._carousel_pos
+        center_idx = max(0, min(n - 1, int(round(pos))))
 
         def _slot(d: float):
-            a = abs(d)
-            # Height shrinks slightly with distance
-            size = int(_CAR_SIZE * max(0.76, 1.0 - 0.08 * min(a, 3.0)))
-            # Width compression: full at centre, ~20 % at distance ≥ 1
-            # (simulates the album rotating ~78° away from the viewer)
-            t = min(a, 1.0)
-            compress = max(0.20, 1.0 - 0.80 * t)
-            w = max(4, int(size * compress))
-            h = size
+            a  = abs(d)
+            t  = min(a, 1.0)
+            # Width: 100 % at centre, _CAR_COMP at d ≥ 1.  Height constant.
+            compress = max(_CAR_COMP, 1.0 - (1.0 - _CAR_COMP) * t)
+            w  = max(4, int(_CAR_SIZE * compress))
             # X centre: piecewise-linear over _CAR_AX key offsets
-            ai   = int(a)
-            af   = a - ai
-            step = len(_CAR_AX) - 1
-            if ai < step:
+            ai = int(a)
+            af = a - ai
+            n_ax = len(_CAR_AX)
+            if ai < n_ax - 1:
                 x_off = _CAR_AX[ai] + (_CAR_AX[ai + 1] - _CAR_AX[ai]) * af
             else:
-                x_off = _CAR_AX[step] + (_CAR_AX[step] - _CAR_AX[step - 1]) * (a - step)
+                x_off = _CAR_AX[-1] + (_CAR_AX[-1] - _CAR_AX[-2]) * (a - n_ax + 1)
             x     = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
             alpha = max(0, int(255 * max(0.0, 1.0 - 0.28 * a)))
-            return x, _CAR_CY, w, h, alpha
+            return x, _CAR_CY, w, _CAR_SIZE, alpha, compress
 
-        # Draw furthest albums first so nearer ones appear on top.
+        # Collect visible slots furthest-first for correct Z-order.
         visible = []
         for i in range(n):
             d = i - pos
             if abs(d) < 3.8:
-                x, y, w, h, alpha = _slot(d)
-                visible.append((abs(d), d, i, x, y, w, h, alpha))
+                x, y, w, h, alpha, compress = _slot(d)
+                visible.append((abs(d), d, i, x, y, w, h, alpha, compress))
         visible.sort(key=lambda v: v[0], reverse=True)
 
-        center_idx = max(0, min(n - 1, int(round(pos))))
+        # Lazy-build reflection fade mask (COL_BG transparent→opaque, top→bottom).
+        if not hasattr(self, "_refl_fade") or self._refl_fade is None:
+            fade = pygame.Surface((W, _CAR_REFL_H), pygame.SRCALPHA)
+            r, g, b = COL_BG
+            for yi in range(_CAR_REFL_H):
+                a = int(255 * yi / _CAR_REFL_H)
+                pygame.draw.line(fade, (r, g, b, a), (0, yi), (W - 1, yi))
+            self._refl_fade = fade
 
-        for _, d, i, x, y, w, h, alpha in visible:
+        # Pass 1 — render each album's surface and draw its reflection below.
+        surfs = []  # (surf, alpha, x, y, w, h) kept for pass 2
+        for _, d, i, x, y, w, h, alpha, compress in visible:
             self._queue_thumb(i)
             thumb = self._albums[i].get("thumb")
             if thumb:
-                surf = pygame.transform.smoothscale(thumb, (w, h))
+                tw, th = thumb.get_size()
+                if abs(d) < 0.05:
+                    # Centre: full art
+                    surf = pygame.transform.smoothscale(thumb, (w, h))
+                elif d > 0:
+                    # Right side: show leftmost slice (near edge of rotation)
+                    cw = max(1, int(tw * compress))
+                    surf = pygame.transform.smoothscale(
+                        thumb.subsurface((0, 0, cw, th)), (w, h))
+                else:
+                    # Left side: show rightmost slice
+                    cw = max(1, int(tw * compress))
+                    surf = pygame.transform.smoothscale(
+                        thumb.subsurface((tw - cw, 0, cw, th)), (w, h))
             else:
                 surf = pygame.Surface((w, h))
                 surf.fill(COL_CELL_BG)
+
+            # Reflection: flip vertically, scale down, dim proportionally to alpha
+            refl = pygame.transform.smoothscale(
+                pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
+            refl.set_alpha(max(0, int(75 * alpha / 255)))
+            self.screen.blit(refl, (x - w // 2, y + h // 2 + 2))
+            surfs.append((surf, alpha, x, y, w, h))
+
+        # Fade the reflections out toward their bottom edge.
+        self.screen.blit(self._refl_fade, (0, _CAR_CY + _CAR_SIZE // 2 + 2))
+
+        # Pass 2 — draw album art on top of reflections (same far→near order).
+        for surf, alpha, x, y, w, h in surfs:
             if alpha < 255:
                 surf.set_alpha(alpha)
             self.screen.blit(surf, (x - w // 2, y - h // 2))
 
-        # Name + artist label below the centre album
+        # Name + artist below centre album (below reflection strip)
         c   = self._albums[center_idx]
-        ty  = _CAR_CY + _CAR_SIZE // 2 + 28
+        ty  = _CAR_CY + _CAR_SIZE // 2 + _CAR_REFL_H + 18
         ns  = _render_text(self._f_title,  c.get("name",   ""), COL_TEXT_TITLE,  W - 80)
         as_ = _render_text(self._f_artist, c.get("artist", ""), COL_TEXT_ARTIST, W - 80)
         self.screen.blit(ns,  ((W - ns.get_width())  // 2, ty))
         self.screen.blit(as_, ((W - as_.get_width()) // 2, ty + ns.get_height() + 6))
-
-        self._draw_progress()
 
     # ── draw: album panel ─────────────────────────────────────────────────────
 
