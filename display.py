@@ -103,10 +103,10 @@ _CAR_CY           = 250    # y-centre of all albums
 _CAR_PX_PER_ALBUM = 220    # px of horizontal drag = 1 album step
 _CAR_REFL_H       = 90     # reflection strip height below each album
 _CAR_CAM_D        = 1500   # virtual camera distance (px) — controls perspective depth
-_CAR_PERSP_N      = 4      # vertical strips for trapezoidal perspective simulation
+_CAR_PERSP_N      = 32     # vertical strips for trapezoidal perspective simulation
 # x-centre offsets from W//2 at integer distances 0, 1, 2.
-# Near edge of side albums overlaps behind the centre album by ~30 px.
-_CAR_AX           = (0, 180, 235)
+# Small gap between centre and side1 so albums are not bunched.
+_CAR_AX           = (0, 220, 290)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -1090,18 +1090,24 @@ class App:
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
                 else:
-                    # Side album: render as _CAR_PERSP_N vertical strips, each with
-                    # a different height to create a trapezoidal perspective shape.
-                    # Near edge is taller; far edge is shorter.
+                    # Side album: render as _CAR_PERSP_N vertical strips with
+                    # linearly varying heights to simulate perspective rotation.
+                    # Albums face the centre: the outer (far-from-centre) edge is
+                    # nearer to the viewer and therefore appears TALLER.
                     surf       = pygame.Surface((w, max_h))
                     surf.fill(COL_BG)
                     N          = _CAR_PERSP_N
                     shadow_max = int(130 * (1.0 - compress))
                     for col in range(N):
-                        # t_persp=0 at near edge, 1 at far edge
-                        t_persp = (col / (N - 1)) if d > 0 else ((N - 1 - col) / (N - 1))
-                        col_h   = max(1, int(near_h + (far_h - near_h) * t_persp))
-                        dst_y   = (max_h - col_h) // 2   # centre strip vertically
+                        # t_persp=0 → outer/viewer-near edge (taller, lit)
+                        # t_persp=1 → inner/centre-near edge (shorter, dark)
+                        # right-side album (d>0): col=0 is LEFT (inner), col=N-1 is RIGHT (outer)
+                        # left-side album  (d<0): col=0 is LEFT (outer), col=N-1 is RIGHT (inner)
+                        t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
+                                  else (col / max(1, N - 1))
+                        # near_h = taller (outer/viewer-near); far_h = shorter (inner/centre-near)
+                        col_h   = max(1, int(far_h + (near_h - far_h) * (1.0 - t_persp)))
+                        dst_y   = (max_h - col_h) // 2
                         src_x   = int(col * tw / N)
                         src_w   = max(1, int((col + 1) * tw / N) - src_x)
                         dst_x   = int(col * w / N)
@@ -1109,13 +1115,12 @@ class App:
                         strip   = pygame.transform.smoothscale(
                                       thumb.subsurface((src_x, 0, src_w, th)),
                                       (dst_w, col_h))
-                        # Directional shadow — darkest at the far edge
+                        # Shadow darkest on the inner (centre-near) side
                         shadow_a = int(shadow_max * t_persp)
                         if shadow_a > 0:
-                            dark = pygame.Surface((dst_w, col_h))
-                            dark.fill((0, 0, 0))
-                            dark.set_alpha(shadow_a)
-                            strip.blit(dark, (0, 0))
+                            df = max(0, 255 - shadow_a)
+                            strip.fill((df, df, df),
+                                       special_flags=pygame.BLEND_MULT)
                         surf.blit(strip, (dst_x, dst_y))
             else:
                 surf = pygame.Surface((w, max_h))
