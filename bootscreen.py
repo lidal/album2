@@ -38,7 +38,10 @@ def _open_fb(device="/dev/fb0", target_w=720, target_h=720):
         struct.pack_into("II", vinfo,  0, target_w, target_h)
         struct.pack_into("II", vinfo,  8, target_w, target_h)
         struct.pack_into("I",  vinfo, 24, 32)
-        fcntl.ioctl(f, FBIOPUT_VSCREENINFO, bytes(vinfo))
+        try:
+            fcntl.ioctl(f, FBIOPUT_VSCREENINFO, bytes(vinfo))
+        except OSError:
+            pass  # DRM-backed fbdev (e.g. vc4drmfb) may not support resolution changes
         vinfo = bytearray(fcntl.ioctl(f, FBIOGET_VSCREENINFO, bytes(160)))
         w, h  = struct.unpack_from("II", vinfo, 0)
     r_off = struct.unpack_from("I", vinfo, 32)[0]
