@@ -66,6 +66,11 @@ class BluetoothManager:
 
     def set_powered(self, on: bool):
         try:
+            if on:
+                # BlueZ persists the powered-off state as an rfkill soft block;
+                # unblock before trying to power on or bluetoothctl will silently fail.
+                subprocess.run(["/usr/sbin/rfkill", "unblock", "bluetooth"],
+                               capture_output=True, timeout=3)
             _run("power", "on" if on else "off", timeout=6)
         except Exception as e:
             log.warning("set_powered %s: %s", on, e)
