@@ -96,6 +96,11 @@ _CELL_W      = (W - GRID_PAD * (GRID_COLS + 1)) // GRID_COLS
 _CELL_H      = _CELL_W + GRID_TEXT_H
 _ROW_H       = _CELL_H + GRID_PAD
 
+# carousel geometry
+_CAR_SIZE         = 400   # center album square size (px)
+_CAR_CY           = 310   # y-center of all albums in carousel
+_CAR_PX_PER_ALBUM = 250   # px of horizontal drag = 1 album step
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -209,6 +214,7 @@ class View(IntEnum):
     SETTINGS  = 3
     SCAN      = 4
     CALIBRATE = 5
+    CAROUSEL  = 6
 
 
 _SETTINGS_ITEMS = [
@@ -217,6 +223,7 @@ _SETTINGS_ITEMS = [
     ("lyrics",      "Show lyrics"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
+    ("carousel",    "Carousel view"),
     (None,          "PERFORMANCE"),
     ("idle_fps",    "Reduce FPS when idle"),
     ("skip_draw",   "Skip redraw when nothing changed"),
@@ -280,7 +287,7 @@ class App:
         self._flash_icon_surf = pygame.Surface((_fs, _fs), pygame.SRCALPHA)
 
         # animation state
-        self._view    = View.GRID
+        self._view    = View.CAROUSEL if settings.get("carousel") else View.GRID
         self._album_y = float(H)   # current (lerped)
         self._album_y_t = float(H) # target
         self._ctrl_a  = 0.0        # controls overlay alpha (current)
@@ -311,6 +318,11 @@ class App:
 
         # peek mode: album art strip at top of grid view
         self._peeking = False
+
+        # carousel state
+        self._carousel_pos:        float = 0.0   # smooth current position (float album index)
+        self._carousel_pos_t:      float = 0.0   # snapped target (integer album index)
+        self._carousel_drag_start: float = 0.0   # carousel_pos captured at touch-start
 
         # settings return target
         self._settings_return: View = View.GRID
@@ -637,8 +649,9 @@ class App:
         k_pan = min(1.0, ANIM_SPEED * dt)
         k_ctl = min(1.0, CTRL_FADE_SPEED * dt)
 
-        self._album_y = _lerp(self._album_y, self._album_y_t, k_pan)
-        self._ctrl_a  = _lerp(self._ctrl_a,  self._ctrl_a_t,  k_ctl)
+        self._album_y      = _lerp(self._album_y,      self._album_y_t,      k_pan)
+        self._ctrl_a       = _lerp(self._ctrl_a,       self._ctrl_a_t,       k_ctl)
+        self._carousel_pos = _lerp(self._carousel_pos, self._carousel_pos_t, k_pan)
 
         k_bg = min(1.0, 3.0 * dt)
         self._tl_bg_cur = [_lerp(self._tl_bg_cur[i], self._tl_bg_t[i], k_bg) for i in range(3)]
@@ -706,6 +719,7 @@ class App:
                 or self._thumbs_pending > 0
                 or (self._cache_cleared_ms
                     and now_ms - self._cache_cleared_ms < 2000)
+                or abs(self._carousel_pos - self._carousel_pos_t) > 0.01
             )
 
         # auto-hide controls overlay after 30 s
@@ -839,6 +853,7 @@ class App:
                 or abs(self._settings_vel) > 0.5
                 or self._view == View.SCAN   # animated dots
                 or self._thumbs_pending > 0
+                or abs(self._carousel_pos - self._carousel_pos_t) > 0.01
             )
 
     # ── draw ──────────────────────────────────────────────────────────────────
@@ -874,6 +889,12 @@ class App:
         if not self._dirty and settings.get("skip_draw") and not settings.get("debug") and not kb_active:
             return False
         self._dirty = False
+        if self._view == View.CAROUSEL:
+            self._draw_carousel()
+            self._draw_volume_badge()
+            if settings.get("debug"):
+                self._draw_debug_overlays()
+            return True
         if self._view == View.SETTINGS:
             self._draw_settings()
             if self._bt_menu_dev is not None:
@@ -987,6 +1008,78 @@ class App:
                     self.screen.blit(sa, (x, ty + sn.get_height() + 2))
         finally:
             self.screen.set_clip(old_clip)
+
+    # ── draw: carousel ────────────────────────────────────────────────────────
+
+    def _draw_carousel(self):
+        self.screen.fill(COL_BG)
+        n = len(self._albums)
+
+        if not n:
+            msg = _render_text(self._f_artist, "Loading library…", COL_TEXT_ALBUM)
+            self.screen.blit(msg, ((W - msg.get_width()) // 2, H // 2))
+            self._draw_progress()
+            return
+
+        pos = self._carousel_pos
+
+        # Absolute x-offsets from W//2 for album centres at distance 0, 1, 2 from centre.
+        # At distance 0 the album is centred; at distance 1 the near edge of the
+        # side album sits just outside the centre album's edge.
+        _AX = (0, 248, 342)
+
+        def _slot(d: float):
+            a = abs(d)
+            t = min(a, 1.0)
+            # Logical height: shrink with distance
+            size = int(_CAR_SIZE * max(0.42, 1.0 - 0.30 * min(a, 2.0)))
+            # X compression simulates perspective rotation
+            compress = max(0.28, 1.0 - 0.72 * t)
+            w = max(4, int(size * compress))
+            h = size
+            # X centre: piecewise linear over _AX key points
+            a0 = min(a, 1.0)
+            a1 = max(0.0, min(a - 1.0, 1.0))
+            a2 = max(0.0, a - 2.0)
+            x_off = (_AX[0] + (_AX[1] - _AX[0]) * a0
+                     + (_AX[2] - _AX[1]) * a1
+                     + (_AX[2] - _AX[1]) * a2)
+            x = W // 2 + int(math.copysign(x_off, d))
+            alpha = max(0, int(255 * max(0.0, 1.0 - 0.55 * a)))
+            return x, _CAR_CY, w, h, alpha
+
+        # Collect visible slots; draw furthest-first so nearer ones appear on top.
+        visible = []
+        for i in range(n):
+            d = i - pos
+            if abs(d) < 2.7:
+                x, y, w, h, alpha = _slot(d)
+                visible.append((abs(d), d, i, x, y, w, h, alpha))
+        visible.sort(key=lambda v: v[0], reverse=True)
+
+        center_idx = max(0, min(n - 1, int(round(pos))))
+
+        for _, d, i, x, y, w, h, alpha in visible:
+            self._queue_thumb(i)
+            thumb = self._albums[i].get("thumb")
+            if thumb:
+                surf = pygame.transform.smoothscale(thumb, (w, h))
+            else:
+                surf = pygame.Surface((w, h))
+                surf.fill(COL_CELL_BG)
+            if alpha < 255:
+                surf.set_alpha(alpha)
+            self.screen.blit(surf, (x - w // 2, y - h // 2))
+
+        # Name + artist label below the centre album
+        c   = self._albums[center_idx]
+        ty  = _CAR_CY + _CAR_SIZE // 2 + 28
+        ns  = _render_text(self._f_title,  c.get("name",   ""), COL_TEXT_TITLE,  W - 80)
+        as_ = _render_text(self._f_artist, c.get("artist", ""), COL_TEXT_ARTIST, W - 80)
+        self.screen.blit(ns,  ((W - ns.get_width())  // 2, ty))
+        self.screen.blit(as_, ((W - as_.get_width()) // 2, ty + ns.get_height() + 6))
+
+        self._draw_progress()
 
     # ── draw: album panel ─────────────────────────────────────────────────────
 
@@ -1309,6 +1402,9 @@ class App:
 
         threading.Thread(target=_load, daemon=True).start()
 
+    def _browse_view(self) -> View:
+        return View.CAROUSEL if settings.get("carousel") else View.GRID
+
     def _go_grid(self):
         self._peeking  = False
         self.player.stop()
@@ -1322,7 +1418,7 @@ class App:
         self._ctrl_a_t  = 0.0
         self._tl_bg_t   = COL_TL_BG
         self._accent_t  = COL_HIGHLIGHT
-        self._view     = View.GRID
+        self._view     = self._browse_view()
 
     def _peek_to_grid(self):
         """Swipe-down from ALBUM: slide art down so only the top strip shows at the bottom."""
@@ -2634,6 +2730,13 @@ class App:
 
         view = self._view
 
+        if view == View.CAROUSEL:
+            n = len(self._albums)
+            if n > 0:
+                idx = max(0, min(n - 1, int(round(self._carousel_pos))))
+                self._go_album(idx)
+            return
+
         if view == View.GRID:
             if self._peeking and pos[1] >= H - TRACKLIST_ART_H:
                 # tap the album strip at bottom → return to full album view
@@ -2664,6 +2767,9 @@ class App:
             key = self._settings_item_at(pos)
             if key:
                 settings.toggle(key)
+                if key == "carousel" and self._view == self._settings_return:
+                    # user is returning to a browse view; refresh it immediately
+                    self._settings_return = self._browse_view()
                 return
             if self._settings_bt_power_toggle_at(pos):
                 new_val = not self._bt_powered
@@ -2900,7 +3006,7 @@ class App:
 
     def _is_panel_touch(self, pos) -> bool:
         """True if pos lands on the currently visible part of the album panel."""
-        if self._view in (View.SETTINGS, View.SCAN, View.CALIBRATE):
+        if self._view in (View.SETTINGS, View.SCAN, View.CALIBRATE, View.CAROUSEL):
             return False
         ay = self._album_y
         if ay >= H - 2:
@@ -3211,6 +3317,8 @@ class App:
                 if self._panel_touch:
                     self._panel_drag_base_y = self._album_y
                     self._panel_drag_start  = pos[1]
+                if self._view == View.CAROUSEL:
+                    self._carousel_drag_start = self._carousel_pos
             self._dirty = True   # immediate press highlight
 
         elif event.type in (pygame.MOUSEMOTION, pygame.FINGERMOTION):
@@ -3261,6 +3369,13 @@ class App:
                     self._settings_scroll = max(0.0, self._settings_scroll - dy)
                     self._settings_vel    = -dy * 60
                     self._grid_vel        = 0.0
+                elif self._view == View.CAROUSEL:
+                    n = len(self._albums)
+                    if n > 1:
+                        dx_total = pos[0] - self._t_start_pos[0]
+                        raw = self._carousel_drag_start - dx_total / _CAR_PX_PER_ALBUM
+                        self._carousel_pos   = max(0.0, min(float(n - 1), raw))
+                        self._carousel_pos_t = self._carousel_pos  # track live; snap on release
 
             self._t_prev_pos = pos
 
@@ -3324,6 +3439,15 @@ class App:
                     else:
                         self.player.previous(); self._reset_elapsed()
                         self._show_flash("prev")
+
+                elif self._view == View.CAROUSEL:
+                    # Snap to nearest album after drag/flick; tap handled below.
+                    n = len(self._albums)
+                    if n > 0:
+                        self._carousel_pos_t = float(
+                            max(0, min(n - 1, round(self._carousel_pos))))
+                    if is_tap:
+                        self._exec_single_tap(self._t_start_pos)
 
                 elif is_tap:
                     if self._view not in (View.ALBUM, View.CALIBRATE):

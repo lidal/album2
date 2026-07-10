@@ -7,6 +7,7 @@ _DEFAULTS: dict = {
     "autoplay":     False,
     "lyrics":       True,
     "grid_labels":  True,
+    "carousel":     False,
     "debug":      False,
     "idle_fps":   True,
     "skip_draw":  True,
