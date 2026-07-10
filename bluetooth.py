@@ -10,6 +10,7 @@ _ANSI_RE   = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
 _DEVICE_RE = re.compile(
     r"\[(NEW|CHG|DEL)\]\s+Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*(.*)"
 )
+_MAC_RE    = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
 
 
 def _run(*args, timeout=5) -> str:
@@ -124,12 +125,12 @@ class BluetoothManager:
                 if event == "NEW":
                     self._seen_addrs.add(addr)
                     name = rest
-                    if name and name != addr:
+                    if name and not _MAC_RE.match(name):
                         self._name_cache[addr] = name
                 elif event == "CHG":
                     if rest.startswith("Name:"):
                         name = rest[5:].strip()
-                        if name:
+                        if name and not _MAC_RE.match(name):
                             self._name_cache[addr] = name
         except Exception:
             pass
