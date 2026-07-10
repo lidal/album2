@@ -99,6 +99,7 @@ def main():
 
     clock   = pygame.time.Clock()
     running = True
+    _booted = False
 
     _pt_update = _pt_draw = _pt_flip = _pt_rgb565 = 0.0
     _pn = 0
@@ -124,6 +125,13 @@ def main():
                 fb.flip(screen)
             else:
                 pygame.display.flip()
+            if not _booted:
+                # Signal bootscreen to exit now that the first frame is on screen.
+                try:
+                    open("/tmp/album2.ready", "w").close()
+                except Exception:
+                    pass
+                _booted = True
         t3 = time.perf_counter()
 
         if drew:
