@@ -169,11 +169,10 @@ class Framebuffer:
             # RGBA/RGBX surface: rmask=0xFF000000 → memory bytes are [R,G,B,A]
             self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
         r_i, g_i, b_i = (2, 1, 0) if self._rgb565_argb else (0, 1, 2)
-        # LUT gather: each 256-entry table fits in L1 cache, replacing astype+2 shifts per channel.
-        rgb565  = self._lut_r[arr8[:, :, r_i]]
-        rgb565 |= self._lut_g[arr8[:, :, g_i]]
-        rgb565 |= self._lut_b[arr8[:, :, b_i]]
-        del arr, arr8
+        rgb565 = arr8[:, :, r_i].astype(np.uint16); rgb565 >>= 3; rgb565 <<= 11
+        g = arr8[:, :, g_i].astype(np.uint16);      g >>= 2;      g <<= 5; rgb565 |= g
+        b = arr8[:, :, b_i].astype(np.uint16);      b >>= 3;               rgb565 |= b
+        del arr, arr8, g, b
         if rotate_180:
             return rgb565[::-1, ::-1].tobytes()
         return rgb565.tobytes()

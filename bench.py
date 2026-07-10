@@ -144,6 +144,18 @@ bench("rgb565 LUT (new)",          _rgb565_lut)
 bench("rgb565 uint32 C-contig",    _rgb565_u32)
 bench("rgb565 shifts (baseline)",  _rgb565_shifts)
 
+# Best candidate: blit to a 16bpp surface and read its pixel buffer directly.
+# SDL's blitter is C+NEON; it converts 32bpp→16bpp in one pass without Python overhead.
+surf16 = pygame.Surface((W, H), 0, 16)
+def _rgb565_sdl_blit():
+    surf16.blit(screen, (0, 0))
+    arr = pygame.surfarray.pixels2d(surf16)
+    data = arr.T.tobytes()
+    del arr
+    return data
+
+bench("rgb565 SDL 16bpp blit",     _rgb565_sdl_blit)
+
 print(f"\n=== Framebuffer write ===")
 FBIOGET_VSCREENINFO = 0x4600
 try:
