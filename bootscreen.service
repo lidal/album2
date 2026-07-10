@@ -1,8 +1,7 @@
 [Unit]
 Description=Album2 boot screen
 DefaultDependencies=no
-Requires=dev-fb0.device
-After=dev-fb0.device
+After=sysinit.target
 Before=album2.service getty@tty1.service
 
 [Service]

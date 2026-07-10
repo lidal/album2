@@ -127,6 +127,14 @@ def main():
     except Exception:
         pass
 
+    # /dev/fb0 appears when the KMS/DRM stack finishes init — poll until it's ready.
+    deadline = time.monotonic() + 30
+    while not os.path.exists("/dev/fb0"):
+        if time.monotonic() > deadline:
+            print("bootscreen: timed out waiting for /dev/fb0", flush=True)
+            return
+        time.sleep(0.05)
+
     try:
         f, buf, w, h, bpp, bgra = _open_fb()
     except Exception as exc:
