@@ -113,8 +113,7 @@ def main():
         drew = display.draw()
         if drew:
             if fb:
-                out = pygame.transform.rotate(screen, ROTATE_DISPLAY) if ROTATE_DISPLAY else screen
-                fb.flip(out)
+                fb.flip(screen, rotate=ROTATE_DISPLAY or 0)
             else:
                 pygame.display.flip()
         # When nothing changed, cap at 15 fps to avoid burning a core on busy-wait.

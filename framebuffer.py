@@ -119,13 +119,29 @@ class Framebuffer:
                 self._map.seek(0)
                 self._map.write(data)
 
-    def flip(self, surface: pygame.Surface) -> None:
+    def flip(self, surface: pygame.Surface, rotate: int = 0) -> None:
+        """Blit surface to the framebuffer, optionally rotating 0/90/180/270 degrees.
+
+        180° is handled in numpy (zero extra Surface allocation).
+        Other angles fall back to pygame.transform.rotate.
+        """
+        if rotate in (90, 270):
+            surface = pygame.transform.rotate(surface, rotate)
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
         if self.bpp == 32:
             data = pygame.image.tostring(surface, self._fmt)
+            if rotate == 180:
+                import numpy as np
+                # Reverse pixel order in-place (each 4-byte BGRA group treated as uint32).
+                # This is equivalent to pygame.transform.rotate(surf, 180) but avoids
+                # allocating a new Surface — the numpy view is zero-copy until .tobytes().
+                data = np.frombuffer(data, dtype=np.uint32)[::-1].tobytes()
         elif self.bpp == 16:
             data = self._to_rgb565(surface)
+            if rotate == 180:
+                import numpy as np
+                data = np.frombuffer(data, dtype=np.uint16)[::-1].tobytes()
         else:
             raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
         # Drop the oldest pending frame if the writer is still busy (maxsize=1).
