@@ -121,7 +121,7 @@ def main():
         t2 = time.perf_counter()
         if drew:
             if fb:
-                fb.flip(screen, rotate=ROTATE_DISPLAY or 0)
+                fb.flip(screen)
             else:
                 pygame.display.flip()
         t3 = time.perf_counter()

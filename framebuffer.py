@@ -126,23 +126,18 @@ class Framebuffer:
                 self._map.seek(0)
                 self._map.write(data)
 
-    def flip(self, surface: pygame.Surface, rotate: int = 0) -> None:
+    def flip(self, surface: pygame.Surface) -> None:
         t0 = time.perf_counter()
-        if rotate in (90, 270):
-            surface = pygame.transform.rotate(surface, rotate)
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
         if self.bpp == 32:
             arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
-            if rotate == 180:
-                data = arr[::-1, ::-1].T.tobytes()
-            else:
-                data = arr.T.tobytes()
+            data = arr.T.tobytes()
             del arr
             self.t_rgb565 = 0.0
         elif self.bpp == 16:
             t1 = time.perf_counter()
-            data = self._to_rgb565(surface, rotate == 180)
+            data = self._to_rgb565(surface)
             self.t_rgb565 = time.perf_counter() - t1
         else:
             raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
@@ -154,11 +149,11 @@ class Framebuffer:
         self._q.put(data)
         self.t_flip = time.perf_counter() - t0
 
-    def _to_rgb565(self, surface: pygame.Surface, rotate_180: bool = False) -> bytes:
+    def _to_rgb565(self, surface: pygame.Surface) -> bytes:
         # SDL's C+NEON blitter converts 32bpp→16bpp in one pass (~4ms vs ~18ms numpy).
         self._surf16.blit(surface, (0, 0))
         arr = pygame.surfarray.pixels2d(self._surf16)   # (W,H) uint16, zero-copy view
-        data = arr.T[::-1, ::-1].tobytes() if rotate_180 else arr.T.tobytes()
+        data = arr.T.tobytes()
         del arr
         return data
 
