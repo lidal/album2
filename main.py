@@ -87,7 +87,7 @@ def main():
             import subprocess
             subprocess.run(["plymouth", "quit"])
         except Exception as exc:
-            log.warning("Cannot close plymouth", exc)
+            log.warning("Cannot close plymouth: %s", exc)
 
     player  = MopidyPlayer()
     volume  = VolumeSimulator() if VOLUME_SIMULATE else VolumeController()
