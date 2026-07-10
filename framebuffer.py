@@ -146,21 +146,24 @@ class Framebuffer:
 
     def _to_rgb565(self, surface: pygame.Surface, rotate_180: bool = False) -> bytes:
         import numpy as np
-        arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
-        # Detect channel layout once from the surface's red-channel mask:
-        #   ARGB/XRGB (rmask=0x00FF0000): R at bits 23-16, G at 15-8, B at 7-0
-        #   RGBA/RGBX (rmask=0xFF000000): R at bits 31-24, G at 23-16, B at 15-8
+        # Reinterpret the (W,H) uint32 view as (W,H,4) uint8 bytes so channel
+        # slices are 518 KB uint8 arrays — 4× smaller than uint32 ops, and avoids
+        # the 22ms overhead of pixels3d which does internal format conversion.
+        arr = pygame.surfarray.pixels2d(surface)
+        arr8 = arr.view(np.uint8).reshape(self.width, self.height, 4)
         if self._rgb565_argb is None:
+            # ARGB/XRGB surface: rmask=0x00FF0000 → memory bytes are [B,G,R,A]
+            # RGBA/RGBX surface: rmask=0xFF000000 → memory bytes are [R,G,B,A]
             self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
-        if self._rgb565_argb:
-            out = ((arr >> 8) & np.uint32(0xF800)) | ((arr >> 5) & np.uint32(0x07E0)) | ((arr >> 3) & np.uint32(0x1F))
-        else:
-            out = ((arr << 8) & np.uint32(0xF800)) | ((arr >> 5) & np.uint32(0x07E0)) | ((arr >> 19) & np.uint32(0x1F))
-        del arr
-        out16 = out.astype(np.uint16)
+        r_i, g_i, b_i = (2, 1, 0) if self._rgb565_argb else (0, 1, 2)
+        # Build RGB565 with in-place shifts on uint16 slices to minimise allocations
+        rgb565 = arr8[:, :, r_i].astype(np.uint16); rgb565 >>= 3; rgb565 <<= 11
+        g = arr8[:, :, g_i].astype(np.uint16);      g >>= 2;      g <<= 5; rgb565 |= g
+        b = arr8[:, :, b_i].astype(np.uint16);      b >>= 3;               rgb565 |= b
+        del arr, arr8, g, b
         if rotate_180:
-            return out16[::-1, ::-1].T.tobytes()
-        return out16.T.tobytes()
+            return rgb565[::-1, ::-1].T.tobytes()
+        return rgb565.T.tobytes()
 
     def close(self) -> None:
         self._q.put(None)  # signal writer to exit
