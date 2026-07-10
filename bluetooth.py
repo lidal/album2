@@ -6,7 +6,10 @@ import logging
 
 log = logging.getLogger(__name__)
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
+_ANSI_RE   = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
+_DEVICE_RE = re.compile(
+    r"\[(NEW|CHG|DEL)\]\s+Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*(.*)"
+)
 
 
 def _run(*args, timeout=5) -> str:
@@ -113,17 +116,18 @@ class BluetoothManager:
         try:
             for raw in proc.stdout:
                 line = _ANSI_RE.sub("", raw.decode("utf-8", errors="replace")).strip()
-                # "[NEW] Device AA:BB:CC:DD:EE:FF Some Name"
-                # "[CHG] Device AA:BB:CC:DD:EE:FF Name: Some Name"
-                parts = line.split()
-                if len(parts) >= 4 and parts[1] == "Device":
-                    addr = parts[2]
-                    if parts[0] == "[NEW]":
-                        name = " ".join(parts[3:])
-                        if name and name != addr:
-                            self._name_cache[addr] = name
-                    elif parts[0] == "[CHG]" and len(parts) >= 5 and parts[3] == "Name:":
-                        name = " ".join(parts[4:])
+                m = _DEVICE_RE.search(line)
+                if not m:
+                    continue
+                event, addr, rest = m.group(1), m.group(2), m.group(3).strip()
+                if event == "NEW":
+                    name = rest
+                    if name and name != addr:
+                        self._name_cache[addr] = name
+                elif event == "CHG":
+                    # "Name: Some Name"
+                    if rest.startswith("Name:"):
+                        name = rest[5:].strip()
                         if name:
                             self._name_cache[addr] = name
         except Exception:
