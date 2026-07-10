@@ -127,9 +127,14 @@ def main():
     except Exception:
         pass
 
-    # /dev/fb0 appears when the KMS/DRM stack finishes init — poll until it's ready.
+    # Poll until /dev/fb0 is openable — it may exist before udev sets video group ownership.
     deadline = time.monotonic() + 30
-    while not os.path.exists("/dev/fb0"):
+    while True:
+        try:
+            open("/dev/fb0", "rb+").close()
+            break
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
         if time.monotonic() > deadline:
             print("bootscreen: timed out waiting for /dev/fb0", flush=True)
             return
@@ -150,9 +155,9 @@ def main():
         dot_pixels = _compute_dot_pixels(w, h, N_DOTS, spoke_r, dot_r)
         _cache_save(w, h, N_DOTS, spoke_r, dot_r, dot_pixels)
 
-    # Fill framebuffer with background colour once
-    buf.seek(0)
-    buf.write(_px(*BG, bpp, bgra) * (w * h))
+    # Precompute background and blank-dot pixel bytes for fast per-frame writes.
+    bg_px    = _px(*BG, bpp, bgra)
+    bg_frame = bg_px * (w * h)   # full frame of background colour
 
     running = True
 
@@ -168,7 +173,10 @@ def main():
     next_tick = time.monotonic()
 
     while running and not os.path.exists(READY_FLAG):
-        # Update only the ~600 dot pixels — no full-frame copy
+        # Redraw full background every frame to cover any console text underneath.
+        buf.seek(0)
+        buf.write(bg_frame)
+        # Draw spinner dots on top.
         for i in range(N_DOTS):
             dist = (head - i) % N_DOTS
             bri  = max(35, 255 - dist * 18)
