@@ -5,6 +5,7 @@ for Raspberry Pi Zero 2W + HyperPixel Square 4.0
 """
 import os
 import sys
+import time
 import logging
 import pygame
 
@@ -99,6 +100,10 @@ def main():
     clock   = pygame.time.Clock()
     running = True
 
+    _pt_update = _pt_draw = _pt_flip = _pt_rgb565 = 0.0
+    _pn = 0
+    _pt_wall = time.perf_counter()
+
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -108,14 +113,41 @@ def main():
             else:
                 display.handle_event(event)
 
+        t0 = time.perf_counter()
         display.update()
+        t1 = time.perf_counter()
         fps = display.target_fps()
         drew = display.draw()
+        t2 = time.perf_counter()
         if drew:
             if fb:
                 fb.flip(screen, rotate=ROTATE_DISPLAY or 0)
             else:
                 pygame.display.flip()
+        t3 = time.perf_counter()
+
+        if drew:
+            _pt_update  += t1 - t0
+            _pt_draw    += t2 - t1
+            _pt_flip    += t3 - t2
+            _pt_rgb565  += fb.t_rgb565 if fb else 0.0
+            _pn         += 1
+            if _pn >= 200:
+                wall = t3 - _pt_wall
+                log.info(
+                    "perf/%d frames  fps=%.0f  update=%.1fms  draw=%.1fms  "
+                    "flip=%.1fms  (rgb565=%.1fms  mmap-wait=%.1fms)",
+                    _pn, _pn / wall,
+                    _pt_update / _pn * 1000,
+                    _pt_draw   / _pn * 1000,
+                    _pt_flip   / _pn * 1000,
+                    _pt_rgb565 / _pn * 1000,
+                    (_pt_flip - _pt_rgb565) / _pn * 1000,
+                )
+                _pt_update = _pt_draw = _pt_flip = _pt_rgb565 = 0.0
+                _pn = 0
+                _pt_wall = t3
+
         # When nothing changed, cap at 15 fps to avoid burning a core on busy-wait.
         clock.tick(fps if drew else min(fps, 15))
 

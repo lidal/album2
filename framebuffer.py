@@ -8,6 +8,7 @@ import mmap
 import queue
 import struct
 import threading
+import time
 import logging
 
 import pygame
@@ -69,6 +70,8 @@ class Framebuffer:
         self._fmt           = "BGRA" if r_off > b_off else "RGBA"
         self._vinfo         = vinfo   # kept for FBIOPAN_DISPLAY calls
         self._rgb565_argb: bool | None = None  # cached surface format for _to_rgb565
+        self.t_rgb565: float = 0.0   # seconds spent in last _to_rgb565 call
+        self.t_flip:   float = 0.0   # seconds spent in last flip() call (excl. mmap write)
 
         # Try to enable double buffering: allocate yres_virtual = 2*yres so we
         # can write to the hidden buffer and flip atomically, eliminating tearing.
@@ -121,6 +124,7 @@ class Framebuffer:
                 self._map.write(data)
 
     def flip(self, surface: pygame.Surface, rotate: int = 0) -> None:
+        t0 = time.perf_counter()
         if rotate in (90, 270):
             surface = pygame.transform.rotate(surface, rotate)
         if surface.get_width() != self.width or surface.get_height() != self.height:
@@ -132,8 +136,11 @@ class Framebuffer:
             else:
                 data = arr.T.tobytes()
             del arr
+            self.t_rgb565 = 0.0
         elif self.bpp == 16:
+            t1 = time.perf_counter()
             data = self._to_rgb565(surface, rotate == 180)
+            self.t_rgb565 = time.perf_counter() - t1
         else:
             raise RuntimeError("Unsupported framebuffer depth: {}bpp".format(self.bpp))
         # Drop the oldest pending frame if the writer is still busy (maxsize=1).
@@ -142,6 +149,7 @@ class Framebuffer:
         except queue.Empty:
             pass
         self._q.put(data)
+        self.t_flip = time.perf_counter() - t0
 
     def _to_rgb565(self, surface: pygame.Surface, rotate_180: bool = False) -> bytes:
         import numpy as np
