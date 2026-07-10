@@ -5,9 +5,8 @@ After=local-fs.target
 Before=album2.service getty@tty1.service
 
 [Service]
-# Suppress kernel printk to console (root required) so boot messages
-# don't overwrite the framebuffer while the boot screen is running.
-ExecStartPre=+/bin/sh -c 'echo 1 4 1 7 > /proc/sys/kernel/printk; for b in /sys/class/vtconsole/vtcon*/bind; do echo 0 > "$b"; done 2>/dev/null; true'
+# Clear the framebuffer to black and suppress console output before Python starts.
+ExecStartPre=+/bin/sh -c 'cat /dev/zero > /dev/fb0 2>/dev/null; echo 1 4 1 7 > /proc/sys/kernel/printk; for b in /sys/class/vtconsole/vtcon*/bind; do echo 0 > "$b" 2>/dev/null; done; true'
 User=pi
 ExecStart=/home/pi/album2/venv/bin/python /home/pi/album2/bootscreen.py
 StandardOutput=journal

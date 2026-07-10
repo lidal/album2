@@ -155,9 +155,10 @@ def main():
         dot_pixels = _compute_dot_pixels(w, h, N_DOTS, spoke_r, dot_r)
         _cache_save(w, h, N_DOTS, spoke_r, dot_r, dot_pixels)
 
-    # Precompute background and blank-dot pixel bytes for fast per-frame writes.
-    bg_px    = _px(*BG, bpp, bgra)
-    bg_frame = bg_px * (w * h)   # full frame of background colour
+    # Build frame in a local bytearray — one mmap write per tick is faster and
+    # smoother than many small mmap writes, and overwrites any console text.
+    bg_px = _px(*BG, bpp, bgra)
+    frame = bytearray(bg_px * (w * h))
 
     running = True
 
@@ -173,17 +174,20 @@ def main():
     next_tick = time.monotonic()
 
     while running and not os.path.exists(READY_FLAG):
-        # Redraw full background every frame to cover any console text underneath.
-        buf.seek(0)
-        buf.write(bg_frame)
-        # Draw spinner dots on top.
+        # Restore previous dot pixels to background in the local frame buffer.
+        for idx in dot_pixels[head]:
+            frame[idx * stride: idx * stride + stride] = bg_px
+        head = (head + 1) % N_DOTS
+        # Paint new dot positions into the local frame buffer.
         for i in range(N_DOTS):
             dist = (head - i) % N_DOTS
             bri  = max(35, 255 - dist * 18)
             px   = _px(bri, bri, bri, bpp, bgra)
             for idx in dot_pixels[i]:
-                buf[idx * stride: idx * stride + stride] = px
-        head      = (head + 1) % N_DOTS
+                frame[idx * stride: idx * stride + stride] = px
+        # Single write covers any console text drawn since last tick.
+        buf.seek(0)
+        buf.write(frame)
         next_tick += interval
         delay = next_tick - time.monotonic()
         if delay > 0:
