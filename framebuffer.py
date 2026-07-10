@@ -69,13 +69,12 @@ class Framebuffer:
         self.bpp            = bpp
         self._fmt           = "BGRA" if r_off > b_off else "RGBA"
         self._vinfo         = vinfo   # kept for FBIOPAN_DISPLAY calls
-        self._rgb565_argb: bool | None = None  # cached surface format for _to_rgb565
         self.t_rgb565: float = 0.0   # seconds spent in last _to_rgb565 call
         self.t_flip:   float = 0.0   # seconds spent in last flip() call (excl. mmap write)
-        import numpy as _np
-        self._lut_r = (_np.arange(256, dtype=_np.uint16) >> 3) << 11   # 512 B — fits in L1
-        self._lut_g = (_np.arange(256, dtype=_np.uint16) >> 2) << 5
-        self._lut_b =  _np.arange(256, dtype=_np.uint16) >> 3
+        if bpp == 16:
+            # Persistent 16bpp surface used by _to_rgb565; SDL's blitter converts
+            # 32bpp→16bpp in C+NEON which is 4× faster than the numpy path.
+            self._surf16 = pygame.Surface((xres, yres), 0, 16)
 
         # Try to enable double buffering: allocate yres_virtual = 2*yres so we
         # can write to the hidden buffer and flip atomically, eliminating tearing.
@@ -156,26 +155,12 @@ class Framebuffer:
         self.t_flip = time.perf_counter() - t0
 
     def _to_rgb565(self, surface: pygame.Surface, rotate_180: bool = False) -> bytes:
-        import numpy as np
-        # Reinterpret the (W,H) uint32 view as (W,H,4) uint8 bytes so channel
-        # slices are 518 KB uint8 arrays — 4× smaller than uint32 ops, and avoids
-        # the 22ms overhead of pixels3d which does internal format conversion.
-        arr = pygame.surfarray.pixels2d(surface)
-        # pixels2d returns (W,H) F-contiguous (surface memory is row-major (H,W)).
-        # .T gives (H,W) C-contiguous, so .view(uint8) works without copying.
-        arr8 = arr.T.view(np.uint8).reshape(self.height, self.width, 4)
-        if self._rgb565_argb is None:
-            # ARGB/XRGB surface: rmask=0x00FF0000 → memory bytes are [B,G,R,A]
-            # RGBA/RGBX surface: rmask=0xFF000000 → memory bytes are [R,G,B,A]
-            self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
-        r_i, g_i, b_i = (2, 1, 0) if self._rgb565_argb else (0, 1, 2)
-        rgb565 = arr8[:, :, r_i].astype(np.uint16); rgb565 >>= 3; rgb565 <<= 11
-        g = arr8[:, :, g_i].astype(np.uint16);      g >>= 2;      g <<= 5; rgb565 |= g
-        b = arr8[:, :, b_i].astype(np.uint16);      b >>= 3;               rgb565 |= b
-        del arr, arr8, g, b
-        if rotate_180:
-            return rgb565[::-1, ::-1].tobytes()
-        return rgb565.tobytes()
+        # SDL's C+NEON blitter converts 32bpp→16bpp in one pass (~4ms vs ~18ms numpy).
+        self._surf16.blit(surface, (0, 0))
+        arr = pygame.surfarray.pixels2d(self._surf16)   # (W,H) uint16, zero-copy view
+        data = arr.T[::-1, ::-1].tobytes() if rotate_180 else arr.T.tobytes()
+        del arr
+        return data
 
     def close(self) -> None:
         self._q.put(None)  # signal writer to exit
