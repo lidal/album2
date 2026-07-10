@@ -98,14 +98,14 @@ _ROW_H       = _CELL_H + GRID_PAD
 
 # carousel geometry
 _CAR_SIZE         = 350   # all albums same height (px) — no scaling with distance
-_CAR_COMP         = 0.22  # width factor for fully-rotated (d≥1) side album ≈ cos(77°)
+_CAR_COMP         = 0.20  # width factor for fully-rotated (d≥1) side album ≈ cos(78°)
 _CAR_CY           = 250   # y-centre of album strip
 _CAR_PX_PER_ALBUM = 220   # px of horizontal drag = 1 album step
 _CAR_REFL_H       = 90    # reflection strip height below each album
-# x-centre offsets from W//2 for albums at integer distances 0,1,2,3,4.
-# Side albums are _CAR_SIZE * _CAR_COMP wide; successive ones are stacked with a
-# 3 px gap so 3 albums appear fully on each side of centre.
-_CAR_AX           = (0, 223, 302, 381, 460)
+# x-centre offsets from W//2 for albums at integer distances 0, 1, 2.
+# Side album width = _CAR_SIZE * _CAR_COMP ≈ 70 px; stacked with an 8 px gap
+# so ~2 side albums appear fully on each side of centre.
+_CAR_AX           = (0, 218, 296)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -1030,37 +1030,36 @@ class App:
             self.screen.blit(msg, ((W - msg.get_width()) // 2, H // 2))
             return
 
-        pos = self._carousel_pos
+        pos        = self._carousel_pos
         center_idx = max(0, min(n - 1, int(round(pos))))
 
         def _slot(d: float):
-            a  = abs(d)
-            t  = min(a, 1.0)
-            # Width: 100 % at centre, _CAR_COMP at d ≥ 1.  Height constant.
+            a        = abs(d)
+            t        = min(a, 1.0)
+            # Full width at centre; shrinks to _CAR_COMP at |d| ≥ 1.
+            # Same height for all albums — compression = horizontal squish only.
             compress = max(_CAR_COMP, 1.0 - (1.0 - _CAR_COMP) * t)
-            w  = max(4, int(_CAR_SIZE * compress))
-            # X centre: piecewise-linear over _CAR_AX key offsets
-            ai = int(a)
-            af = a - ai
-            n_ax = len(_CAR_AX)
+            w        = max(4, int(_CAR_SIZE * compress))
+            n_ax     = len(_CAR_AX)
+            ai, af   = int(a), a - int(a)
             if ai < n_ax - 1:
                 x_off = _CAR_AX[ai] + (_CAR_AX[ai + 1] - _CAR_AX[ai]) * af
             else:
                 x_off = _CAR_AX[-1] + (_CAR_AX[-1] - _CAR_AX[-2]) * (a - n_ax + 1)
             x     = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
-            alpha = max(0, int(255 * max(0.0, 1.0 - 0.28 * a)))
+            alpha = max(0, int(255 * max(0.0, 1.0 - 0.32 * a)))
             return x, _CAR_CY, w, _CAR_SIZE, alpha, compress
 
-        # Collect visible slots furthest-first for correct Z-order.
+        # Furthest first so nearer albums blit on top.
         visible = []
         for i in range(n):
             d = i - pos
-            if abs(d) < 3.8:
+            if abs(d) < 2.4:
                 x, y, w, h, alpha, compress = _slot(d)
                 visible.append((abs(d), d, i, x, y, w, h, alpha, compress))
         visible.sort(key=lambda v: v[0], reverse=True)
 
-        # Lazy-build reflection fade mask (COL_BG transparent→opaque, top→bottom).
+        # Lazy-build reflection fade mask once (COL_BG, transparent→opaque top→bottom).
         if not hasattr(self, "_refl_fade") or self._refl_fade is None:
             fade = pygame.Surface((W, _CAR_REFL_H), pygame.SRCALPHA)
             r, g, b = COL_BG
@@ -1069,41 +1068,39 @@ class App:
                 pygame.draw.line(fade, (r, g, b, a), (0, yi), (W - 1, yi))
             self._refl_fade = fade
 
-        # Pass 1 — render each album's surface and draw its reflection below.
-        surfs = []  # (surf, alpha, x, y, w, h) kept for pass 2
+        # Pass 1 — build surfaces + draw reflections (far→near so reflections
+        #           also stack correctly before the fade mask covers them).
+        surfs = []
         for _, d, i, x, y, w, h, alpha, compress in visible:
             self._queue_thumb(i)
             thumb = self._albums[i].get("thumb")
             if thumb:
-                tw, th = thumb.get_size()
-                if abs(d) < 0.05:
-                    # Centre: full art
-                    surf = pygame.transform.smoothscale(thumb, (w, h))
-                elif d > 0:
-                    # Right side: show leftmost slice (near edge of rotation)
-                    cw = max(1, int(tw * compress))
-                    surf = pygame.transform.smoothscale(
-                        thumb.subsurface((0, 0, cw, th)), (w, h))
-                else:
-                    # Left side: show rightmost slice
-                    cw = max(1, int(tw * compress))
-                    surf = pygame.transform.smoothscale(
-                        thumb.subsurface((tw - cw, 0, cw, th)), (w, h))
+                surf = pygame.transform.smoothscale(thumb, (w, h))
             else:
                 surf = pygame.Surface((w, h))
                 surf.fill(COL_CELL_BG)
 
-            # Reflection: flip vertically, scale down, dim proportionally to alpha
+            # Directional shadow: dark overlay on the far side of each rotated album.
+            # Gives depth cue that makes the squish read as perspective rotation.
+            if abs(d) > 0.05:
+                shadow_a  = int(140 * (1.0 - compress))  # stronger when more rotated
+                sw        = max(1, w // 2)
+                shadow    = pygame.Surface((sw, h), pygame.SRCALPHA)
+                shadow.fill((0, 0, 0, shadow_a))
+                shadow_x  = w - sw if d > 0 else 0   # right-half for right albums, left for left
+                surf.blit(shadow, (shadow_x, 0))
+
+            # Reflection below album
             refl = pygame.transform.smoothscale(
                 pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
-            refl.set_alpha(max(0, int(75 * alpha / 255)))
+            refl.set_alpha(max(0, int(70 * alpha / 255)))
             self.screen.blit(refl, (x - w // 2, y + h // 2 + 2))
             surfs.append((surf, alpha, x, y, w, h))
 
-        # Fade the reflections out toward their bottom edge.
+        # Fade mask wipes the reflection strip bottom-to-transparent.
         self.screen.blit(self._refl_fade, (0, _CAR_CY + _CAR_SIZE // 2 + 2))
 
-        # Pass 2 — draw album art on top of reflections (same far→near order).
+        # Pass 2 — draw album bodies (same far→near order; near ends up on top).
         for surf, alpha, x, y, w, h in surfs:
             if alpha < 255:
                 surf.set_alpha(alpha)
