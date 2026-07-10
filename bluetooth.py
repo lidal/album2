@@ -121,9 +121,8 @@ class BluetoothManager:
                     continue
                 event, addr, rest = m.group(1), m.group(2), m.group(3).strip()
                 if event == "NEW":
-                    name = rest
-                    if name and name != addr:
-                        self._name_cache[addr] = name
+                    name = rest if (rest and rest != addr) else addr
+                    self._name_cache[addr] = name
                 elif event == "CHG":
                     # "Name: Some Name"
                     if rest.startswith("Name:"):
