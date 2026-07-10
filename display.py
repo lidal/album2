@@ -97,9 +97,13 @@ _CELL_H      = _CELL_W + GRID_TEXT_H
 _ROW_H       = _CELL_H + GRID_PAD
 
 # carousel geometry
-_CAR_SIZE         = 400   # center album square size (px)
-_CAR_CY           = 310   # y-center of all albums in carousel
-_CAR_PX_PER_ALBUM = 250   # px of horizontal drag = 1 album step
+_CAR_SIZE         = 350   # center album square size (px)
+_CAR_CY           = 285   # y-center of the album strip
+_CAR_PX_PER_ALBUM = 220   # px of horizontal drag = 1 album step
+# x-centre offsets from W//2 for albums at distance 0, 1, 2, 3, 4 from centre.
+# Built from near-edge stacking: each side album's left edge is just right of
+# the previous one's right edge, so 3 albums are fully visible on each side.
+_CAR_AX           = (0, 215, 278, 334, 395)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -919,9 +923,12 @@ class App:
 
         ay = self._album_y
 
-        # ── layer 1: grid (when album is off-screen or peeking above) ───────────
+        # ── layer 1: grid/carousel (when album is off-screen or peeking above) ──
         if ay > 2 or self._peeking:
-            self._draw_grid()
+            if self._view == View.CAROUSEL:
+                self._draw_carousel()
+            else:
+                self._draw_grid()
 
         # ── layer 2: tracklist (drawn behind album art so art slides over it) ─
         if ay < -2 and not self._peeking:
@@ -1023,36 +1030,33 @@ class App:
 
         pos = self._carousel_pos
 
-        # Absolute x-offsets from W//2 for album centres at distance 0, 1, 2 from centre.
-        # At distance 0 the album is centred; at distance 1 the near edge of the
-        # side album sits just outside the centre album's edge.
-        _AX = (0, 248, 342)
-
         def _slot(d: float):
             a = abs(d)
+            # Height shrinks slightly with distance
+            size = int(_CAR_SIZE * max(0.76, 1.0 - 0.08 * min(a, 3.0)))
+            # Width compression: full at centre, ~20 % at distance ≥ 1
+            # (simulates the album rotating ~78° away from the viewer)
             t = min(a, 1.0)
-            # Logical height: shrink with distance
-            size = int(_CAR_SIZE * max(0.42, 1.0 - 0.30 * min(a, 2.0)))
-            # X compression simulates perspective rotation
-            compress = max(0.28, 1.0 - 0.72 * t)
+            compress = max(0.20, 1.0 - 0.80 * t)
             w = max(4, int(size * compress))
             h = size
-            # X centre: piecewise linear over _AX key points
-            a0 = min(a, 1.0)
-            a1 = max(0.0, min(a - 1.0, 1.0))
-            a2 = max(0.0, a - 2.0)
-            x_off = (_AX[0] + (_AX[1] - _AX[0]) * a0
-                     + (_AX[2] - _AX[1]) * a1
-                     + (_AX[2] - _AX[1]) * a2)
-            x = W // 2 + int(math.copysign(x_off, d))
-            alpha = max(0, int(255 * max(0.0, 1.0 - 0.55 * a)))
+            # X centre: piecewise-linear over _CAR_AX key offsets
+            ai   = int(a)
+            af   = a - ai
+            step = len(_CAR_AX) - 1
+            if ai < step:
+                x_off = _CAR_AX[ai] + (_CAR_AX[ai + 1] - _CAR_AX[ai]) * af
+            else:
+                x_off = _CAR_AX[step] + (_CAR_AX[step] - _CAR_AX[step - 1]) * (a - step)
+            x     = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
+            alpha = max(0, int(255 * max(0.0, 1.0 - 0.28 * a)))
             return x, _CAR_CY, w, h, alpha
 
-        # Collect visible slots; draw furthest-first so nearer ones appear on top.
+        # Draw furthest albums first so nearer ones appear on top.
         visible = []
         for i in range(n):
             d = i - pos
-            if abs(d) < 2.7:
+            if abs(d) < 3.8:
                 x, y, w, h, alpha = _slot(d)
                 visible.append((abs(d), d, i, x, y, w, h, alpha))
         visible.sort(key=lambda v: v[0], reverse=True)
@@ -1426,7 +1430,7 @@ class App:
         self._album_y_t = float(H - TRACKLIST_ART_H)   # 576 → top 144px of art at screen bottom
         self._ctrl_a    = 0.0
         self._ctrl_a_t  = 0.0
-        self._view      = View.GRID
+        self._view      = self._browse_view()
 
     def _unpeek(self):
         """Return from peek mode back to full ALBUM view."""
@@ -3020,9 +3024,9 @@ class App:
     def _snap_panel(self, total_y: float):
         """Snap _album_y_t to the nearest snap point, biased by drag direction."""
         snaps = [
-            (float(_TL_ALBUM_Y),          View.TRACKLIST, False),
-            (0.0,                          View.ALBUM,     False),
-            (float(H - TRACKLIST_ART_H),   View.GRID,      True),
+            (float(_TL_ALBUM_Y),          View.TRACKLIST,       False),
+            (0.0,                          View.ALBUM,           False),
+            (float(H - TRACKLIST_ART_H),   self._browse_view(),  True),
         ]
         # Dragging down from peek → go to grid (same as stop button)
         started_at_peek = self._panel_drag_base_y >= H - TRACKLIST_ART_H - 2
@@ -3349,7 +3353,7 @@ class App:
                         self._view    = View.TRACKLIST
                         self._peeking = False
                     elif new_y > 0:
-                        self._view    = View.GRID
+                        self._view    = self._browse_view()
                         self._peeking = True
                     else:
                         self._view    = View.ALBUM
