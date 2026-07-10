@@ -2767,8 +2767,8 @@ class App:
             key = self._settings_item_at(pos)
             if key:
                 settings.toggle(key)
-                if key == "carousel" and self._view == self._settings_return:
-                    # user is returning to a browse view; refresh it immediately
+                if key == "carousel":
+                    # update return-view so closing settings lands in the right mode
                     self._settings_return = self._browse_view()
                 return
             if self._settings_bt_power_toggle_at(pos):
