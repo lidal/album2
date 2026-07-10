@@ -95,6 +95,7 @@ class BluetoothManager:
         if self._scan_proc is not None:
             return
         self._name_cache = {}
+        self._seen_addrs: set[str] = set()
         try:
             self._scan_proc = subprocess.Popen(
                 ["bluetoothctl"],
@@ -121,10 +122,11 @@ class BluetoothManager:
                     continue
                 event, addr, rest = m.group(1), m.group(2), m.group(3).strip()
                 if event == "NEW":
-                    name = rest if (rest and rest != addr) else addr
-                    self._name_cache[addr] = name
+                    self._seen_addrs.add(addr)
+                    name = rest
+                    if name and name != addr:
+                        self._name_cache[addr] = name
                 elif event == "CHG":
-                    # "Name: Some Name"
                     if rest.startswith("Name:"):
                         name = rest[5:].strip()
                         if name:
