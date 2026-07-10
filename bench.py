@@ -105,6 +105,45 @@ bench("fill+blit+tostring (no α)", _full_no_alpha)
 bench("fill+blit+tostring (α=254)",_full_alpha254)
 bench("fill+blit+pixels2d",        _full_pixels2d)
 
+print(f"\n=== RGB565 conversion (16bpp path) ===")
+
+# Current: LUT gather (3 × fancy-index, 256-entry LUT fits in L1)
+lut_r = (np.arange(256, dtype=np.uint16) >> 3) << 11
+lut_g = (np.arange(256, dtype=np.uint16) >> 2) << 5
+lut_b =  np.arange(256, dtype=np.uint16) >> 3
+
+def _rgb565_lut():
+    arr = pygame.surfarray.pixels2d(screen)
+    arr8 = arr.T.view(np.uint8).reshape(H, W, 4)
+    r565  = lut_r[arr8[:, :, 2]]
+    r565 |= lut_g[arr8[:, :, 1]]
+    r565 |= lut_b[arr8[:, :, 0]]
+    del arr, arr8
+    return r565.tobytes()
+
+# Alternative: single uint32 formula on C-contiguous array (no strided reads, more data)
+def _rgb565_u32():
+    arr32 = np.asarray(pygame.surfarray.pixels2d(screen).T, dtype=np.uint32)  # C-contiguous copy
+    result  = arr32 >> 8;  result &= np.uint32(0xF800)
+    tmp     = arr32 >> 5;  tmp    &= np.uint32(0x07E0); result |= tmp; del tmp
+    tmp     = arr32 >> 3;  tmp    &= np.uint32(0x001F); result |= tmp; del tmp
+    del arr32
+    return result.astype(np.uint16).tobytes()
+
+# Baseline: old shift arithmetic (what we had before LUT)
+def _rgb565_shifts():
+    arr = pygame.surfarray.pixels2d(screen)
+    arr8 = arr.T.view(np.uint8).reshape(H, W, 4)
+    r = arr8[:, :, 2].astype(np.uint16); r >>= 3; r <<= 11
+    g = arr8[:, :, 1].astype(np.uint16); g >>= 2; g <<= 5;  r |= g
+    b = arr8[:, :, 0].astype(np.uint16); b >>= 3;            r |= b
+    del arr, arr8, g, b
+    return r.tobytes()
+
+bench("rgb565 LUT (new)",          _rgb565_lut)
+bench("rgb565 uint32 C-contig",    _rgb565_u32)
+bench("rgb565 shifts (baseline)",  _rgb565_shifts)
+
 print(f"\n=== Framebuffer write ===")
 FBIOGET_VSCREENINFO = 0x4600
 try:

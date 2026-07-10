@@ -72,6 +72,10 @@ class Framebuffer:
         self._rgb565_argb: bool | None = None  # cached surface format for _to_rgb565
         self.t_rgb565: float = 0.0   # seconds spent in last _to_rgb565 call
         self.t_flip:   float = 0.0   # seconds spent in last flip() call (excl. mmap write)
+        import numpy as _np
+        self._lut_r = (_np.arange(256, dtype=_np.uint16) >> 3) << 11   # 512 B — fits in L1
+        self._lut_g = (_np.arange(256, dtype=_np.uint16) >> 2) << 5
+        self._lut_b =  _np.arange(256, dtype=_np.uint16) >> 3
 
         # Try to enable double buffering: allocate yres_virtual = 2*yres so we
         # can write to the hidden buffer and flip atomically, eliminating tearing.
@@ -165,11 +169,11 @@ class Framebuffer:
             # RGBA/RGBX surface: rmask=0xFF000000 → memory bytes are [R,G,B,A]
             self._rgb565_argb = bool(surface.get_masks()[0] & 0x00FF0000)
         r_i, g_i, b_i = (2, 1, 0) if self._rgb565_argb else (0, 1, 2)
-        # Build RGB565 in (H,W) order — tobytes() produces row-major framebuffer data directly.
-        rgb565 = arr8[:, :, r_i].astype(np.uint16); rgb565 >>= 3; rgb565 <<= 11
-        g = arr8[:, :, g_i].astype(np.uint16);      g >>= 2;      g <<= 5; rgb565 |= g
-        b = arr8[:, :, b_i].astype(np.uint16);      b >>= 3;               rgb565 |= b
-        del arr, arr8, g, b
+        # LUT gather: each 256-entry table fits in L1 cache, replacing astype+2 shifts per channel.
+        rgb565  = self._lut_r[arr8[:, :, r_i]]
+        rgb565 |= self._lut_g[arr8[:, :, g_i]]
+        rgb565 |= self._lut_b[arr8[:, :, b_i]]
+        del arr, arr8
         if rotate_180:
             return rgb565[::-1, ::-1].tobytes()
         return rgb565.tobytes()
