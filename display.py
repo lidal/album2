@@ -1084,38 +1084,38 @@ class App:
                 pygame.draw.line(fade, (r, g, b, a), (0, yi), (W - 1, yi))
             self._refl_fade = fade
 
-        # Pass 1 — render each album surface + draw reflection below floor_y.
+        # Pass 1 — render each album surface + draw reflection below it.
         #
-        # Strips are CENTRE-aligned within surf (dst_y = (max_h - col_h)//2).
-        # This gives a perspective-correct angled top AND angled bottom:
-        # the near (tall) column extends to floor_y while the far (short)
-        # column ends above floor_y, creating the visible tilt.
+        # Strips are CENTRE-aligned (dst_y = (max_h - col_h)//2) giving a
+        # perspective-correct angled top AND angled bottom.
         #
-        # The reflection surface is a plain (non-SRCALPHA) Surface so it is
-        # fully opaque — front reflections completely cover rear ones.
-        # Each column's reflection is placed at refl_y = near_h//2 - col_h//2
-        # within the refl_surf, matching the angled bottom geometry.
+        # Reflections are drawn per-column directly onto the screen at each
+        # column's actual bottom y, so the reflection seamlessly meets the
+        # album edge at every point. Each column uses a solid (non-SRCALPHA)
+        # Surface so front reflections completely cover rear ones.
         surfs = []
         for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
             self._queue_thumb(i)
             thumb  = self._albums[i].get("thumb")
             max_h  = near_h   # near_h >= far_h always
+            album_blit_y = floor_y - max_h   # where surf lands in pass 2
 
             if thumb:
-                tw, th    = thumb.get_size()
-                refl_surf = pygame.Surface((w, _CAR_REFL_H))
-                refl_surf.fill(COL_BG)
+                tw, th = thumb.get_size()
 
                 if near_h == far_h:
                     # Centre album: plain scale, no perspective.
                     surf = pygame.Surface((w, near_h))
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
-                    # Simple flip + dim for the reflection.
+                    # Reflection: all columns bottom at floor_y → single blit.
+                    refl_surf = pygame.Surface((w, _CAR_REFL_H))
+                    refl_surf.fill(COL_BG)
                     flipped = pygame.transform.smoothscale(
                         pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
                     flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                     refl_surf.blit(flipped, (0, 0))
+                    self.screen.blit(refl_surf, (x - w // 2, floor_y))
                 else:
                     # Side album: _CAR_PERSP_N centre-aligned strips.
                     surf = pygame.Surface((w, max_h))
@@ -1140,27 +1140,23 @@ class App:
                         if shadow_a > 0:
                             df = max(0, 255 - shadow_a)
                             strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
-                        # Per-column reflection with perspective-correct offset.
-                        # The near column (col_h=near_h) starts at floor_y (refl_y=0).
-                        # Shorter columns start further below floor_y, mirroring
-                        # the angled bottom of the album.
-                        refl_y = near_h // 2 - col_h // 2
-                        if refl_y < _CAR_REFL_H:
-                            rh = min(col_h, _CAR_REFL_H - refl_y)
-                            if rh > 0:
-                                piece = pygame.transform.flip(
-                                    strip.subsurface((0, col_h - rh, dst_w, rh)),
-                                    False, True)
-                                piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                                refl_surf.blit(piece, (dst_x, refl_y))
+                        # Reflection drawn at the column's actual bottom screen y so
+                        # the reflection meets the album edge at every column.
+                        col_bottom_y = album_blit_y + dst_y + col_h
+                        rh = min(col_h, _CAR_REFL_H)
+                        refl_col = pygame.Surface((dst_w, _CAR_REFL_H))
+                        refl_col.fill(COL_BG)
+                        flipped = pygame.transform.flip(
+                            strip.subsurface((0, col_h - rh, dst_w, rh)),
+                            False, True)
+                        flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                        refl_col.blit(flipped, (0, 0))
+                        self.screen.blit(refl_col, (x - w // 2 + dst_x, col_bottom_y))
                         surf.blit(strip, (dst_x, dst_y))
             else:
-                surf      = pygame.Surface((w, near_h))
+                surf = pygame.Surface((w, near_h))
                 surf.fill(COL_CELL_BG)
-                refl_surf = None
 
-            if refl_surf is not None:
-                self.screen.blit(refl_surf, (x - w // 2, floor_y))
             surfs.append((surf, alpha, x, max_h))
 
         # Fade mask erases reflections below floor_y (transparent at top → opaque).
