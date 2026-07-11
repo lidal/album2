@@ -121,18 +121,6 @@ class _DRMPageFlip:
         lib.drmModePageFlip.restype      = ctypes.c_int
         lib.drmModePageFlip.argtypes     = [ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32,
                                             ctypes.c_uint32, ctypes.c_void_p]
-        lib.drmModeCreateDumbBuffer.restype  = ctypes.c_int
-        lib.drmModeCreateDumbBuffer.argtypes = [
-            ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
-            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_uint64)]
-        lib.drmModeAddFB.restype  = ctypes.c_int
-        lib.drmModeAddFB.argtypes = [ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32,
-                                     ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint32,
-                                     ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
-        lib.drmModeMapDumbBuffer.restype  = ctypes.c_int
-        lib.drmModeMapDumbBuffer.argtypes = [ctypes.c_int, ctypes.c_uint32,
-                                             ctypes.POINTER(ctypes.c_uint64)]
         self._lib = lib
 
         self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
@@ -199,27 +187,44 @@ class _DRMPageFlip:
             lib.drmModeFreeResources(rp)
         raise RuntimeError("No connected DRM connector with active CRTC found")
 
+    # DRM_IOCTL_MODE_CREATE_DUMB = _IOWR('D', 0xB2, struct drm_mode_create_dumb)
+    # struct: height(u32) width(u32) bpp(u32) flags(u32) handle(u32) pitch(u32) size(u64)
+    _CREATE_DUMB = 0xC02044B2
+    # DRM_IOCTL_MODE_MAP_DUMB = _IOWR('D', 0xB3, struct drm_mode_map_dumb)
+    # struct: handle(u32) pad(u32) offset(u64)
+    _MAP_DUMB    = 0xC01044B3
+    # DRM_IOCTL_MODE_ADDFB = _IOWR('D', 0xAE, struct drm_mode_fb_cmd)
+    # struct: fb_id(u32) width(u32) height(u32) pitch(u32) bpp(u32) depth(u32) handle(u32)
+    _ADDFB       = 0xC01C44AE
+
     def _create_buffer(self) -> tuple[int, int, mmap.mmap]:
-        lib = self._lib
-        handle = ctypes.c_uint32(0)
-        pitch  = ctypes.c_uint32(0)
-        size   = ctypes.c_uint64(0)
-        r = lib.drmModeCreateDumbBuffer(self._fd, self.width, self.height, self.bpp, 0,
-                                        ctypes.byref(handle), ctypes.byref(pitch),
-                                        ctypes.byref(size))
-        if r != 0:
-            raise RuntimeError(f"drmModeCreateDumbBuffer failed: {r}")
-        fb_id = ctypes.c_uint32(0)
-        r = lib.drmModeAddFB(self._fd, self.width, self.height, 16, self.bpp,
-                              pitch.value, handle.value, ctypes.byref(fb_id))
-        if r != 0:
-            raise RuntimeError(f"drmModeAddFB failed: {r}")
-        offset = ctypes.c_uint64(0)
-        r = lib.drmModeMapDumbBuffer(self._fd, handle.value, ctypes.byref(offset))
-        if r != 0:
-            raise RuntimeError(f"drmModeMapDumbBuffer failed: {r}")
-        m = mmap.mmap(self._fd, size.value, access=mmap.ACCESS_WRITE, offset=offset.value)
-        return handle.value, fb_id.value, m
+        # CREATE_DUMB — kernel fills in handle, pitch, size
+        buf = bytearray(32)
+        struct.pack_into("IIII", buf, 0, self.height, self.width, self.bpp, 0)
+        fcntl.ioctl(self._fd, self._CREATE_DUMB, buf)
+        handle = struct.unpack_from("I", buf, 16)[0]
+        pitch  = struct.unpack_from("I", buf, 20)[0]
+        size   = struct.unpack_from("Q", buf, 24)[0]
+        if handle == 0:
+            raise RuntimeError("CREATE_DUMB returned handle=0")
+
+        # ADDFB — kernel fills in fb_id at offset 0
+        fb_buf = bytearray(28)
+        struct.pack_into("IIIIIII", fb_buf, 0, 0, self.width, self.height, pitch,
+                         self.bpp, 16, handle)
+        fcntl.ioctl(self._fd, self._ADDFB, fb_buf)
+        fb_id = struct.unpack_from("I", fb_buf, 0)[0]
+        if fb_id == 0:
+            raise RuntimeError("ADDFB returned fb_id=0")
+
+        # MAP_DUMB — kernel fills in mmap offset at offset 8
+        map_buf = bytearray(16)
+        struct.pack_into("II", map_buf, 0, handle, 0)
+        fcntl.ioctl(self._fd, self._MAP_DUMB, map_buf)
+        offset = struct.unpack_from("Q", map_buf, 8)[0]
+
+        m = mmap.mmap(self._fd, size, access=mmap.ACCESS_WRITE, offset=offset)
+        return handle, fb_id, m
 
     def flip(self, data: bytes) -> None:
         """Write frame bytes to the back buffer and page-flip at the next vsync."""
