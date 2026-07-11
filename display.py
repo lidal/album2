@@ -1108,13 +1108,15 @@ class App:
                     surf = pygame.Surface((w, near_h))
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
-                    # Reflection: all columns bottom at floor_y → single blit.
+                    # Reflection: take the actual bottom _CAR_REFL_H rows of the
+                    # album (no scale/compression), matching the side-album approach.
                     refl_surf = pygame.Surface((w, _CAR_REFL_H))
                     refl_surf.fill(COL_BG)
-                    flipped = pygame.transform.smoothscale(
-                        pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
-                    flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                    refl_surf.blit(flipped, (0, 0))
+                    rh = min(near_h, _CAR_REFL_H)
+                    piece = pygame.transform.flip(
+                        surf.subsurface((0, near_h - rh, w, rh)), False, True)
+                    piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                    refl_surf.blit(piece, (0, 0))
                     self.screen.blit(refl_surf, (x - w // 2, floor_y))
                 else:
                     # Side album: _CAR_PERSP_N centre-aligned strips.

@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 FBIOGET_VSCREENINFO = 0x4600
 FBIOPUT_VSCREENINFO = 0x4601
 FBIOPAN_DISPLAY     = 0x4606
+# _IOW('F', 0x20, __u32) — block until next vertical blank (single-buffer vsync)
+FBIO_WAITFORVSYNC   = 0x40044620
 
 # input_event on 64-bit Linux: two int64 (timeval) + uint16 type + uint16 code + int32 value
 _EV_FMT = "qqHHi"
@@ -98,6 +100,9 @@ class Framebuffer:
             self._map = mmap.mmap(self._f.fileno(), xres * yres * (bpp // 8))
             log.info("Framebuffer %s: %dx%d %dbpp %s", device, xres, yres, bpp, self._fmt)
 
+        # Try vsync on the single-buffer path; disabled on first failure.
+        self._vsync = not self._dbl
+
         # Worker thread owns the mmap write; GIL is released during I/O so this
         # runs on a second core while the main thread renders the next frame.
         self._q: queue.Queue[bytes | None] = queue.Queue(maxsize=1)
@@ -123,6 +128,12 @@ class Framebuffer:
                     log.warning("FBIOPAN_DISPLAY failed: %s", e)
                 self._back = 1 - back
             else:
+                if self._vsync:
+                    try:
+                        fcntl.ioctl(self._f, FBIO_WAITFORVSYNC, struct.pack("I", 0))
+                    except Exception as exc:
+                        log.info("FBIO_WAITFORVSYNC not supported (%s), vsync disabled", exc)
+                        self._vsync = False
                 self._map.seek(0)
                 self._map.write(data)
 
