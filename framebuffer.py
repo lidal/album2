@@ -186,8 +186,11 @@ class _DRMPageFlip:
                         mode = _DrmModeModeInfo()
                         ctypes.memmove(ctypes.byref(mode), conn.modes,
                                        ctypes.sizeof(_DrmModeModeInfo))
+                        # Save before drmModeFreeConnector — [0] is a reference,
+                        # not a copy, so reading after free returns garbage.
+                        connector_id = conn.connector_id
                         lib.drmModeFreeConnector(cp)
-                        return crtc_id, conn.connector_id, mode
+                        return crtc_id, connector_id, mode
                 lib.drmModeFreeConnector(cp)
         finally:
             lib.drmModeFreeResources(rp)
