@@ -187,15 +187,16 @@ class _DRMPageFlip:
             lib.drmModeFreeResources(rp)
         raise RuntimeError("No connected DRM connector with active CRTC found")
 
-    # DRM_IOCTL_MODE_CREATE_DUMB = _IOWR('D', 0xB2, struct drm_mode_create_dumb)
+    # DRM_IOCTL_BASE = 'd' (0x64), not 'D' (0x44)
+    # DRM_IOCTL_MODE_CREATE_DUMB = _IOWR('d', 0xB2, struct drm_mode_create_dumb)
     # struct: height(u32) width(u32) bpp(u32) flags(u32) handle(u32) pitch(u32) size(u64)
-    _CREATE_DUMB = 0xC02044B2
-    # DRM_IOCTL_MODE_MAP_DUMB = _IOWR('D', 0xB3, struct drm_mode_map_dumb)
+    _CREATE_DUMB = 0xC02064B2
+    # DRM_IOCTL_MODE_MAP_DUMB = _IOWR('d', 0xB3, struct drm_mode_map_dumb)
     # struct: handle(u32) pad(u32) offset(u64)
-    _MAP_DUMB    = 0xC01044B3
-    # DRM_IOCTL_MODE_ADDFB = _IOWR('D', 0xAE, struct drm_mode_fb_cmd)
+    _MAP_DUMB    = 0xC01064B3
+    # DRM_IOCTL_MODE_ADDFB = _IOWR('d', 0xAE, struct drm_mode_fb_cmd)
     # struct: fb_id(u32) width(u32) height(u32) pitch(u32) bpp(u32) depth(u32) handle(u32)
-    _ADDFB       = 0xC01C44AE
+    _ADDFB       = 0xC01C64AE
 
     def _create_buffer(self) -> tuple[int, int, mmap.mmap]:
         # CREATE_DUMB — kernel fills in handle, pitch, size
