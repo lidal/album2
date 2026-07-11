@@ -124,9 +124,12 @@ class _DRMPageFlip:
         self._lib = lib
 
         self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
-        lib.drmSetMaster(self._fd)
+        master_r = lib.drmSetMaster(self._fd)
+        log.info("DRM: fd=%d drmSetMaster=%d", self._fd, master_r)
 
         crtc_id, connector_id, mode = self._discover()
+        log.info("DRM: discovered crtc_id=%d connector_id=%d %dx%d@%dHz",
+                 crtc_id, connector_id, mode.hdisplay, mode.vdisplay, mode.vrefresh)
         self._crtc_id      = crtc_id
         self._connector_id = connector_id
         self._mode         = mode
@@ -142,12 +145,15 @@ class _DRMPageFlip:
             self._handles.append(handle)
             self._fb_ids.append(fb_id)
             self._maps.append(m)
+        log.info("DRM: created fb_ids=%s handles=%s", self._fb_ids, self._handles)
 
         conn_arr = ctypes.c_uint32(connector_id)
         mode_ref = _DrmModeModeInfo()
         ctypes.memmove(ctypes.byref(mode_ref), ctypes.byref(mode), ctypes.sizeof(mode))
         r = lib.drmModeSetCrtc(self._fd, crtc_id, self._fb_ids[0],
                                0, 0, ctypes.byref(conn_arr), 1, ctypes.byref(mode_ref))
+        log.info("DRM: drmModeSetCrtc(crtc=%d fb=%d conn=%d) = %d",
+                 crtc_id, self._fb_ids[0], connector_id, r)
         if r != 0:
             raise RuntimeError(f"drmModeSetCrtc returned {r}")
 
