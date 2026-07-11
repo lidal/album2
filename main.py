@@ -97,13 +97,13 @@ def main():
     audio   = AudioOutputManager(player._vol_backend)
     display = AlbumDisplay(screen, player, volume, bt, wifi, audio)
 
+    clock   = pygame.time.Clock()
     running = True
     _booted = False
 
     _pt_update = _pt_draw = _pt_flip = _pt_rgb565 = 0.0
     _pn = 0
     _pt_wall = time.perf_counter()
-    _t_frame_start = time.perf_counter()
 
     while running:
         for event in pygame.event.get():
@@ -156,14 +156,10 @@ def main():
                 _pn = 0
                 _pt_wall = t3
 
-        # Float-precision frame cap — clock.tick(60) rounds 1000/60→16ms giving 62fps;
-        # that 2fps excess causes a rolling tear as writes drift past the vertical blank.
-        _target_fps = fps if drew else min(fps, 15)
-        _elapsed = time.perf_counter() - _t_frame_start
-        _sleep_s = (1.0 / _target_fps) - _elapsed
-        if _sleep_s > 0.0005:
-            time.sleep(_sleep_s)
-        _t_frame_start = time.perf_counter()
+        # clock.tick(60) rounds 1000/60→16ms giving 62fps, which races the 60Hz display.
+        # 58fps target: 1000/58=17ms → 58.8fps, just under 60Hz so writes never catch
+        # the scan — tear line is stationary rather than rolling.
+        clock.tick(min(fps, 58) if drew else min(fps, 15))
 
     log.info("Shutting down")
     player.disconnect()
