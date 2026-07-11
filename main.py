@@ -156,10 +156,11 @@ def main():
                 _pn = 0
                 _pt_wall = t3
 
-        # clock.tick(60) rounds 1000/60→16ms giving 62fps, which races the 60Hz display.
-        # 58fps target: 1000/58=17ms → 58.8fps, just under 60Hz so writes never catch
-        # the scan — tear line is stationary rather than rolling.
-        clock.tick(min(fps, 58) if drew else min(fps, 15))
+        # DRM page-flip blocks on vsync — the loop is already rate-limited.
+        # fbdev path: target 58fps (1000/58=17ms → 58.8fps, just below 60Hz display
+        # rate so the write never catches the scan — no rolling tear line).
+        if not (drew and fb and fb.paces_loop):
+            clock.tick(min(fps, 58) if drew else min(fps, 15))
 
     log.info("Shutting down")
     player.disconnect()

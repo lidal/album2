@@ -1,11 +1,15 @@
 """
 Direct framebuffer + evdev touch for SDL2 offscreen mode.
 Used on Raspberry Pi when no SDL video driver supports /dev/fb0 natively.
+Tries DRM/KMS page-flip first (tear-free), falls back to /dev/fb0 single-buffer.
 """
 from __future__ import annotations
+import ctypes
 import fcntl
 import mmap
+import os
 import queue
+import select
 import struct
 import threading
 import time
@@ -18,8 +22,230 @@ log = logging.getLogger(__name__)
 FBIOGET_VSCREENINFO = 0x4600
 FBIOPUT_VSCREENINFO = 0x4601
 FBIOPAN_DISPLAY     = 0x4606
-# _IOW('F', 0x20, __u32) — block until next vertical blank (single-buffer vsync)
 FBIO_WAITFORVSYNC   = 0x40044620
+
+
+# ── DRM/KMS page-flip ─────────────────────────────────────────────────────────
+
+class _DrmModeModeInfo(ctypes.Structure):
+    _fields_ = [
+        ("clock",       ctypes.c_uint32),
+        ("hdisplay",    ctypes.c_uint16), ("hsync_start", ctypes.c_uint16),
+        ("hsync_end",   ctypes.c_uint16), ("htotal",      ctypes.c_uint16),
+        ("hskew",       ctypes.c_uint16),
+        ("vdisplay",    ctypes.c_uint16), ("vsync_start", ctypes.c_uint16),
+        ("vsync_end",   ctypes.c_uint16), ("vtotal",      ctypes.c_uint16),
+        ("vscan",       ctypes.c_uint16),
+        ("vrefresh",    ctypes.c_uint32),
+        ("flags",       ctypes.c_uint32),
+        ("type",        ctypes.c_uint32),
+        ("name",        ctypes.c_char * 32),
+    ]
+
+class _DrmModeRes(ctypes.Structure):
+    _fields_ = [
+        ("count_fbs",        ctypes.c_int),
+        ("fbs",              ctypes.c_void_p),
+        ("count_crtcs",      ctypes.c_int),
+        ("crtcs",            ctypes.c_void_p),
+        ("count_connectors", ctypes.c_int),
+        ("connectors",       ctypes.c_void_p),
+        ("count_encoders",   ctypes.c_int),
+        ("encoders",         ctypes.c_void_p),
+        ("min_width",        ctypes.c_uint32), ("max_width",  ctypes.c_uint32),
+        ("min_height",       ctypes.c_uint32), ("max_height", ctypes.c_uint32),
+    ]
+
+class _DrmModeConnector(ctypes.Structure):
+    _fields_ = [
+        ("connector_id",      ctypes.c_uint32),
+        ("encoder_id",        ctypes.c_uint32),
+        ("connector_type",    ctypes.c_uint32),
+        ("connector_type_id", ctypes.c_uint32),
+        ("connection",        ctypes.c_uint32),
+        ("mmWidth",           ctypes.c_uint32),
+        ("mmHeight",          ctypes.c_uint32),
+        ("subpixel",          ctypes.c_uint32),
+        ("count_modes",       ctypes.c_int),
+        ("modes",             ctypes.POINTER(_DrmModeModeInfo)),
+        ("count_props",       ctypes.c_int),
+        ("props",             ctypes.c_void_p),
+        ("prop_values",       ctypes.c_void_p),
+        ("count_encoders",    ctypes.c_int),
+        ("encoders",          ctypes.c_void_p),
+    ]
+
+class _DrmModeEncoder(ctypes.Structure):
+    _fields_ = [
+        ("encoder_id",      ctypes.c_uint32),
+        ("encoder_type",    ctypes.c_uint32),
+        ("crtc_id",         ctypes.c_uint32),
+        ("possible_crtcs",  ctypes.c_uint32),
+        ("possible_clones", ctypes.c_uint32),
+    ]
+
+_DRM_MODE_PAGE_FLIP_EVENT = 0x01
+_DRM_EVENT_FLIP_COMPLETE  = 0x02
+
+
+class _DRMPageFlip:
+    """
+    DRM/KMS double-buffered page-flip renderer.
+    Writes to the hidden back buffer while the front buffer is being scanned,
+    then atomically swaps at the next vertical blank — completely tear-free.
+    flip() blocks until the swap completes, naturally pacing the loop to 60 fps.
+    """
+
+    def __init__(self, device: str = "/dev/dri/card0") -> None:
+        lib = ctypes.CDLL("libdrm.so.2")
+
+        lib.drmSetMaster.restype         = ctypes.c_int
+        lib.drmSetMaster.argtypes        = [ctypes.c_int]
+        lib.drmModeGetResources.restype  = ctypes.c_void_p
+        lib.drmModeGetResources.argtypes = [ctypes.c_int]
+        lib.drmModeFreeResources.restype = None
+        lib.drmModeFreeResources.argtypes= [ctypes.c_void_p]
+        lib.drmModeGetConnector.restype  = ctypes.c_void_p
+        lib.drmModeGetConnector.argtypes = [ctypes.c_int, ctypes.c_uint32]
+        lib.drmModeFreeConnector.restype = None
+        lib.drmModeFreeConnector.argtypes= [ctypes.c_void_p]
+        lib.drmModeGetEncoder.restype    = ctypes.c_void_p
+        lib.drmModeGetEncoder.argtypes   = [ctypes.c_int, ctypes.c_uint32]
+        lib.drmModeFreeEncoder.restype   = None
+        lib.drmModeFreeEncoder.argtypes  = [ctypes.c_void_p]
+        lib.drmModeSetCrtc.restype       = ctypes.c_int
+        lib.drmModeSetCrtc.argtypes      = [ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32,
+                                            ctypes.c_uint32, ctypes.c_uint32,
+                                            ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+                                            ctypes.POINTER(_DrmModeModeInfo)]
+        lib.drmModePageFlip.restype      = ctypes.c_int
+        lib.drmModePageFlip.argtypes     = [ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32,
+                                            ctypes.c_uint32, ctypes.c_void_p]
+        lib.drmModeCreateDumbBuffer.restype  = ctypes.c_int
+        lib.drmModeCreateDumbBuffer.argtypes = [
+            ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint64)]
+        lib.drmModeAddFB.restype  = ctypes.c_int
+        lib.drmModeAddFB.argtypes = [ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32,
+                                     ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint32,
+                                     ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+        lib.drmModeMapDumbBuffer.restype  = ctypes.c_int
+        lib.drmModeMapDumbBuffer.argtypes = [ctypes.c_int, ctypes.c_uint32,
+                                             ctypes.POINTER(ctypes.c_uint64)]
+        self._lib = lib
+
+        self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        lib.drmSetMaster(self._fd)
+
+        crtc_id, connector_id, mode = self._discover()
+        self._crtc_id      = crtc_id
+        self._connector_id = connector_id
+        self._mode         = mode
+        self.width         = mode.hdisplay
+        self.height        = mode.vdisplay
+        self.bpp           = 16
+
+        self._fb_ids: list[int]        = []
+        self._maps:   list[mmap.mmap]  = []
+        self._handles: list[int]       = []
+        for _ in range(2):
+            handle, fb_id, m = self._create_buffer()
+            self._handles.append(handle)
+            self._fb_ids.append(fb_id)
+            self._maps.append(m)
+
+        conn_arr = ctypes.c_uint32(connector_id)
+        mode_ref = _DrmModeModeInfo()
+        ctypes.memmove(ctypes.byref(mode_ref), ctypes.byref(mode), ctypes.sizeof(mode))
+        r = lib.drmModeSetCrtc(self._fd, crtc_id, self._fb_ids[0],
+                               0, 0, ctypes.byref(conn_arr), 1, ctypes.byref(mode_ref))
+        if r != 0:
+            raise RuntimeError(f"drmModeSetCrtc returned {r}")
+
+        self._back = 1
+        log.info("DRM page-flip: %dx%d @%dHz on crtc=%d connector=%d",
+                 self.width, self.height, mode.vrefresh, crtc_id, connector_id)
+
+    def _discover(self) -> tuple[int, int, _DrmModeModeInfo]:
+        lib = self._lib
+        rp  = lib.drmModeGetResources(self._fd)
+        if not rp:
+            raise RuntimeError("drmModeGetResources failed")
+        res = ctypes.cast(rp, ctypes.POINTER(_DrmModeRes))[0]
+        conn_ids = (ctypes.c_uint32 * res.count_connectors).from_address(res.connectors)
+        try:
+            for i in range(res.count_connectors):
+                cp = lib.drmModeGetConnector(self._fd, conn_ids[i])
+                if not cp:
+                    continue
+                conn = ctypes.cast(cp, ctypes.POINTER(_DrmModeConnector))[0]
+                connected  = conn.connection == 1
+                has_modes  = conn.count_modes > 0
+                has_enc    = conn.encoder_id != 0
+                if connected and has_modes and has_enc:
+                    ep = lib.drmModeGetEncoder(self._fd, conn.encoder_id)
+                    enc = ctypes.cast(ep, ctypes.POINTER(_DrmModeEncoder))[0]
+                    crtc_id = enc.crtc_id
+                    lib.drmModeFreeEncoder(ep)
+                    if crtc_id:
+                        mode = _DrmModeModeInfo()
+                        ctypes.memmove(ctypes.byref(mode), conn.modes,
+                                       ctypes.sizeof(_DrmModeModeInfo))
+                        lib.drmModeFreeConnector(cp)
+                        return crtc_id, conn.connector_id, mode
+                lib.drmModeFreeConnector(cp)
+        finally:
+            lib.drmModeFreeResources(rp)
+        raise RuntimeError("No connected DRM connector with active CRTC found")
+
+    def _create_buffer(self) -> tuple[int, int, mmap.mmap]:
+        lib = self._lib
+        handle = ctypes.c_uint32(0)
+        pitch  = ctypes.c_uint32(0)
+        size   = ctypes.c_uint64(0)
+        r = lib.drmModeCreateDumbBuffer(self._fd, self.width, self.height, self.bpp, 0,
+                                        ctypes.byref(handle), ctypes.byref(pitch),
+                                        ctypes.byref(size))
+        if r != 0:
+            raise RuntimeError(f"drmModeCreateDumbBuffer failed: {r}")
+        fb_id = ctypes.c_uint32(0)
+        r = lib.drmModeAddFB(self._fd, self.width, self.height, 16, self.bpp,
+                              pitch.value, handle.value, ctypes.byref(fb_id))
+        if r != 0:
+            raise RuntimeError(f"drmModeAddFB failed: {r}")
+        offset = ctypes.c_uint64(0)
+        r = lib.drmModeMapDumbBuffer(self._fd, handle.value, ctypes.byref(offset))
+        if r != 0:
+            raise RuntimeError(f"drmModeMapDumbBuffer failed: {r}")
+        m = mmap.mmap(self._fd, size.value, access=mmap.ACCESS_WRITE, offset=offset.value)
+        return handle.value, fb_id.value, m
+
+    def flip(self, data: bytes) -> None:
+        """Write frame bytes to the back buffer and page-flip at the next vsync."""
+        m = self._maps[self._back]
+        m.seek(0)
+        m.write(data)
+        r = self._lib.drmModePageFlip(self._fd, self._crtc_id,
+                                       self._fb_ids[self._back],
+                                       _DRM_MODE_PAGE_FLIP_EVENT, None)
+        if r == 0:
+            rlist, _, _ = select.select([self._fd], [], [], 0.1)
+            if rlist:
+                try:
+                    os.read(self._fd, 64)
+                except OSError:
+                    pass
+        self._back ^= 1
+
+    def close(self) -> None:
+        for m in self._maps:
+            m.close()
+        try:
+            self._lib.drmDropMaster(self._fd)
+        except Exception:
+            pass
+        os.close(self._fd)
 
 # input_event on 64-bit Linux: two int64 (timeval) + uint16 type + uint16 code + int32 value
 _EV_FMT = "qqHHi"
@@ -40,10 +266,32 @@ def _eviocgabs(axis: int) -> int:
 
 
 class Framebuffer:
-    """Blits a pygame surface directly to /dev/fb0 each frame."""
+    """
+    Renders pygame surfaces to the display.
+    Tries DRM/KMS page-flip first (vsync-locked, tear-free).
+    Falls back to /dev/fb0 mmap if DRM is unavailable.
+    When `paces_loop` is True the caller must NOT sleep — flip() already blocks on vsync.
+    """
 
     def __init__(self, device: str = "/dev/fb0",
                  target_w: int = 0, target_h: int = 0) -> None:
+        self._drm: _DRMPageFlip | None = None
+        self.t_rgb565: float = 0.0
+        self.t_flip:   float = 0.0
+        self.paces_loop: bool = False
+
+        try:
+            drm = _DRMPageFlip("/dev/dri/card0")
+            self._drm        = drm
+            self.width       = drm.width
+            self.height      = drm.height
+            self.bpp         = drm.bpp
+            self._surf16     = pygame.Surface((drm.width, drm.height), 0, 16)
+            self.paces_loop  = True
+            return
+        except Exception as exc:
+            log.info("DRM unavailable (%s), falling back to %s", exc, device)
+
         self._f = open(device, "rb+")
         vinfo   = bytearray(fcntl.ioctl(self._f, FBIOGET_VSCREENINFO, bytes(160)))
         xres, yres = struct.unpack_from("II", vinfo, 0)
@@ -141,6 +389,13 @@ class Framebuffer:
         t0 = time.perf_counter()
         if surface.get_width() != self.width or surface.get_height() != self.height:
             surface = pygame.transform.scale(surface, (self.width, self.height))
+        if self._drm is not None:
+            t1 = time.perf_counter()
+            data = self._to_rgb565(surface)
+            self.t_rgb565 = time.perf_counter() - t1
+            self._drm.flip(data)
+            self.t_flip = time.perf_counter() - t0
+            return
         if self.bpp == 32:
             arr = pygame.surfarray.pixels2d(surface)   # (W,H) uint32, zero-copy view
             data = arr.T.tobytes()
@@ -169,6 +424,9 @@ class Framebuffer:
         return data
 
     def close(self) -> None:
+        if self._drm is not None:
+            self._drm.close()
+            return
         self._q.put(None)  # signal writer to exit
         self._map.close()
         self._f.close()
