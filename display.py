@@ -1039,9 +1039,8 @@ class App:
             t        = min(a, 1.0)
             compress = max(_CAR_COMP, 1.0 - (1.0 - _CAR_COMP) * t)
             w        = max(4, int(_CAR_SIZE * compress))
-            # Perspective: near edge taller, far edge shorter (trapezoid shape).
-            # overall_scale pulls side albums back in 3D so their tall edge
-            # stays visually smaller than the centre album's height.
+            # overall_scale pulls side albums back in 3D so the tall (outer)
+            # edge stays visually smaller than the centre album.
             overall_scale = 1.0 if a < 0.001 else max(_CAR_SIDE_SCALE,
                                 1.0 - (1.0 - _CAR_SIDE_SCALE) * min(a, 1.0))
             sin_th   = math.sqrt(max(0.0, 1.0 - compress * compress))
@@ -1057,9 +1056,8 @@ class App:
                 x_off = _CAR_AX[ai] + (_CAR_AX[ai + 1] - _CAR_AX[ai]) * af
             else:
                 x_off = _CAR_AX[-1] + (_CAR_AX[-1] - _CAR_AX[-2]) * (a - n_ax + 1)
-            x     = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
-            alpha = max(0, int(255 * max(0.0, 1.0 - 0.32 * a)))
-            return x, w, near_h, far_h, alpha, compress
+            x = W // 2 + int(math.copysign(x_off, d)) if d != 0.0 else W // 2
+            return x, w, near_h, far_h, compress
 
         # All albums share the same floor line (bottom of centre album).
         floor_y = _CAR_CY + _CAR_SIZE // 2
@@ -1068,9 +1066,13 @@ class App:
         visible = []
         for i in range(n):
             d = i - pos
-            if abs(d) < 2.4:
-                x, w, near_h, far_h, alpha, compress = _slot(d)
-                visible.append((abs(d), d, i, x, w, near_h, far_h, alpha, compress))
+            a = abs(d)
+            if a < 2.4:
+                x, w, near_h, far_h, compress = _slot(d)
+                # Fade only the very outermost albums (a > 1.4) so core albums
+                # are fully opaque; the fade gracefully clips the far-edge album.
+                alpha = max(0, int(255 * max(0.0, 1.0 - max(0.0, a - 1.4) / 0.9)))
+                visible.append((a, d, i, x, w, near_h, far_h, compress, alpha))
         visible.sort(key=lambda v: v[0], reverse=True)
 
         # Lazy-build reflection fade mask (transparent → COL_BG, top → bottom).
@@ -1082,39 +1084,51 @@ class App:
                 pygame.draw.line(fade, (r, g, b, a), (0, yi), (W - 1, yi))
             self._refl_fade = fade
 
-        # Pass 1 — render each album surface + draw reflection below it.
-        # Strips are bottom-aligned inside surf so flip(surf) is a geometrically
-        # correct floor reflection: each column's bottom aligns with floor_y.
+        # Pass 1 — render each album surface + draw reflection below floor_y.
+        #
+        # Strips are CENTRE-aligned within surf (dst_y = (max_h - col_h)//2).
+        # This gives a perspective-correct angled top AND angled bottom:
+        # the near (tall) column extends to floor_y while the far (short)
+        # column ends above floor_y, creating the visible tilt.
+        #
+        # The reflection surface is a plain (non-SRCALPHA) Surface so it is
+        # fully opaque — front reflections completely cover rear ones.
+        # Each column's reflection is placed at refl_y = near_h//2 - col_h//2
+        # within the refl_surf, matching the angled bottom geometry.
         surfs = []
-        for _, d, i, x, w, near_h, far_h, alpha, compress in visible:
+        for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
             self._queue_thumb(i)
             thumb  = self._albums[i].get("thumb")
-            max_h  = max(near_h, far_h)
+            max_h  = near_h   # near_h >= far_h always
 
             if thumb:
-                tw, th = thumb.get_size()
+                tw, th    = thumb.get_size()
+                refl_surf = pygame.Surface((w, _CAR_REFL_H))
+                refl_surf.fill(COL_BG)
+
                 if near_h == far_h:
-                    # Centre album: plain scale, fills the entire surf (already bottom-aligned).
+                    # Centre album: plain scale, no perspective.
                     surf = pygame.Surface((w, near_h))
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
+                    # Simple flip + dim for the reflection.
+                    flipped = pygame.transform.smoothscale(
+                        pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
+                    flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                    refl_surf.blit(flipped, (0, 0))
                 else:
-                    # Side album: _CAR_PERSP_N vertical strips, varying heights.
-                    # Strips are bottom-aligned (dst_y = max_h - col_h) so that
-                    # every column's bottom pixel is at row max_h-1 (= floor_y when
-                    # surf is blitted at floor_y - max_h). Flipping surf then gives
-                    # a reflection where each column starts at floor_y.
-                    surf       = pygame.Surface((w, max_h))
+                    # Side album: _CAR_PERSP_N centre-aligned strips.
+                    surf = pygame.Surface((w, max_h))
                     surf.fill(COL_BG)
                     N          = _CAR_PERSP_N
                     shadow_max = int(130 * (1.0 - compress))
                     for col in range(N):
-                        # t_persp=0 → outer/viewer-near edge (taller, lit)
-                        # t_persp=1 → inner/centre-near edge (shorter, dark)
+                        # t_persp=0 → outer (near, tall, lit)
+                        # t_persp=1 → inner (far, short, dark)
                         t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
                                   else (col / max(1, N - 1))
                         col_h   = max(1, int(far_h + (near_h - far_h) * (1.0 - t_persp)))
-                        dst_y   = max_h - col_h   # bottom-aligned
+                        dst_y   = (max_h - col_h) // 2   # centre-aligned → angled top+bottom
                         src_x   = int(col * tw / N)
                         src_w   = max(1, int((col + 1) * tw / N) - src_x)
                         dst_x   = int(col * w / N)
@@ -1125,26 +1139,35 @@ class App:
                         shadow_a = int(shadow_max * t_persp)
                         if shadow_a > 0:
                             df = max(0, 255 - shadow_a)
-                            strip.fill((df, df, df),
-                                       special_flags=pygame.BLEND_MULT)
+                            strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
+                        # Per-column reflection with perspective-correct offset.
+                        # The near column (col_h=near_h) starts at floor_y (refl_y=0).
+                        # Shorter columns start further below floor_y, mirroring
+                        # the angled bottom of the album.
+                        refl_y = near_h // 2 - col_h // 2
+                        if refl_y < _CAR_REFL_H:
+                            rh = min(col_h, _CAR_REFL_H - refl_y)
+                            if rh > 0:
+                                piece = pygame.transform.flip(
+                                    strip.subsurface((0, col_h - rh, dst_w, rh)),
+                                    False, True)
+                                piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                                refl_surf.blit(piece, (dst_x, refl_y))
                         surf.blit(strip, (dst_x, dst_y))
             else:
-                surf = pygame.Surface((w, max_h))
+                surf      = pygame.Surface((w, near_h))
                 surf.fill(COL_CELL_BG)
+                refl_surf = None
 
-            # Reflection: flip surf (bottom-aligned → top-aligned after flip),
-            # scale down to _CAR_REFL_H, blit directly below floor_y.
-            refl = pygame.transform.smoothscale(
-                pygame.transform.flip(surf, False, True), (w, _CAR_REFL_H))
-            refl.set_alpha(max(0, int(65 * alpha / 255)))
-            self.screen.blit(refl, (x - w // 2, floor_y))
+            if refl_surf is not None:
+                self.screen.blit(refl_surf, (x - w // 2, floor_y))
             surfs.append((surf, alpha, x, max_h))
 
-        # Fade mask erases reflection below floor_y (transparent at top → opaque).
+        # Fade mask erases reflections below floor_y (transparent at top → opaque).
         self.screen.blit(self._refl_fade, (0, floor_y))
 
-        # Pass 2 — album bodies (far→near so nearer albums sit on top).
-        # Blit so each surf's bottom row lands exactly at floor_y.
+        # Pass 2 — album bodies (far→near).
+        # floor_y - max_h positions the near column's bottom exactly at floor_y.
         for surf, alpha, x, max_h in surfs:
             if alpha < 255:
                 surf.set_alpha(alpha)
