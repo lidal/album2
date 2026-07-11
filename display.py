@@ -1118,8 +1118,12 @@ class App:
                     self.screen.blit(refl_surf, (x - w // 2, floor_y))
                 else:
                     # Side album: _CAR_PERSP_N centre-aligned strips.
-                    surf = pygame.Surface((w, max_h))
-                    surf.fill(COL_BG)
+                    # SRCALPHA with transparent background so the COL_BG
+                    # padding around each strip doesn't overwrite the
+                    # reflection drawn beneath the album in pass 1.
+                    surf = pygame.Surface((w, max_h), pygame.SRCALPHA)
+                    r, g, b = COL_BG
+                    surf.fill((r, g, b, 0))
                     N          = _CAR_PERSP_N
                     shadow_max = int(130 * (1.0 - compress))
                     for col in range(N):
