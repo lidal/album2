@@ -1564,15 +1564,18 @@ class App:
     def _go_album(self, idx: int):
         if idx < 0 or idx >= len(self._albums):
             return
-        self._cur_idx   = idx
-        self._peeking   = False
-        album           = self._albums[idx]
-        self._tracks    = []
-        self._ctrl_a    = 0.0
-        self._ctrl_a_t  = 0.0
-        self._album_y_t = 0.0
-        self._view      = View.ALBUM
-        self._tl_scroll = 0.0
+        self._cur_idx        = idx
+        self._peeking        = False
+        album                = self._albums[idx]
+        self._tracks         = []
+        self._ctrl_a         = 0.0
+        self._ctrl_a_t       = 0.0
+        self._album_y_t      = 0.0
+        self._view           = View.ALBUM
+        self._tl_scroll      = 0.0
+        # Reset progress so previous album's position doesn't carry over
+        self._elapsed_base   = 0.0
+        self._elapsed_base_t = time.monotonic()
 
         # Immediately show album-level info (title will refine once tracks load)
         self.player.set_song_optimistic({
@@ -3678,6 +3681,8 @@ class App:
                 time_str = self._status.get("time", "")
                 parts    = time_str.split(":") if time_str else []
                 dur      = float(parts[1]) if len(parts) >= 2 else 0.0
+                if dur <= 0:
+                    dur = float(self._song.get("time", 0) or 0)
                 self._elapsed_base   = frac * dur
                 self._elapsed_base_t = time.monotonic()
                 self._t_start_pos    = None

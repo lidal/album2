@@ -249,13 +249,17 @@ class MopidyPlayer:
                 log.warning("setvol failed (%s): %s", self._vol_backend, e)
 
     def seek(self, fraction: float):
-        status = self.get_status()
-        # Mopidy doesn't expose "duration"; parse total from "time" ("elapsed:total")
+        status   = self.get_status()
         time_str = status.get("time", "")
-        parts = time_str.split(":") if time_str else []
-        dur = float(parts[1]) if len(parts) >= 2 else float(status.get("duration", 0) or 0)
-        if dur > 0:
-            self._cmd("seekcur", int(fraction * dur))
+        parts    = time_str.split(":") if time_str else []
+        dur_s    = float(parts[1]) if len(parts) >= 2 else 0.0
+        if dur_s <= 0:
+            # Spotify / streams: duration missing from status; try currentsong
+            song  = self.get_current_song()
+            dur_s = float(song.get("time", 0) or 0)
+        if dur_s > 0:
+            # RPC seek takes milliseconds and works for all backends (local + Spotify)
+            self._rpc("core.playback.seek", time_position=int(fraction * dur_s * 1000))
 
     def play_track_in_queue(self, pos: int, track: dict | None = None):
         """Play by position in the current queue (0-indexed) via HTTP RPC."""
