@@ -1128,7 +1128,7 @@ class App:
 
             # d_sign distinguishes left/right perspective direction; must be part
             # of the cache key or albums show the wrong face after crossing centre.
-            cache_key = (i, w, near_h, far_h, d > 0)
+            cache_key = (i, w, near_h, far_h, d > 0, _refl)
             if use_cache and thumb and cache_key in self._car_surf_cache:
                 surf, refl_comp = self._car_surf_cache[cache_key]
                 if _refl:
