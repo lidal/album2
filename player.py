@@ -434,7 +434,7 @@ class MopidyPlayer:
         parsed from the response so the caller can populate the UI.
         """
         self._rpc("core.tracklist.clear")
-        tl_tracks = self._rpc("core.tracklist.add", uri=album_uri) or []
+        tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
         tracks = []
         for tlt in tl_tracks:
             t       = tlt.get("track", {}) if isinstance(tlt, dict) else {}
