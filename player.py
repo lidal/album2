@@ -254,12 +254,15 @@ class MopidyPlayer:
         parts    = time_str.split(":") if time_str else []
         dur_s    = float(parts[1]) if len(parts) >= 2 else 0.0
         if dur_s <= 0:
-            # Spotify / streams: duration missing from status; try currentsong
             song  = self.get_current_song()
             dur_s = float(song.get("time", 0) or 0)
+        log.info("seek frac=%.3f dur_s=%.1f time_str=%r", fraction, dur_s, time_str)
         if dur_s > 0:
-            # RPC seek takes milliseconds and works for all backends (local + Spotify)
-            self._rpc("core.playback.seek", time_position=int(fraction * dur_s * 1000))
+            target_ms = int(fraction * dur_s * 1000)
+            result = self._rpc("core.playback.seek", time_position=target_ms)
+            log.info("seek target=%dms result=%r", target_ms, result)
+        else:
+            log.warning("seek: dur_s=0, cannot seek")
 
     def play_track_in_queue(self, pos: int, track: dict | None = None):
         """Play by position in the current queue (0-indexed) via HTTP RPC."""
