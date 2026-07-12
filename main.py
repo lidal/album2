@@ -156,10 +156,12 @@ def main():
                 _pn = 0
                 _pt_wall = t3
 
-        # DRM page-flip blocks on vsync — the loop is already rate-limited.
+        # DRM page-flip blocks on vsync — normally rate-limited by hardware.
+        # When target fps drops below 60 (idle mode), also call clock.tick so the
+        # loop sleeps after the vsync to honour the lower rate.
         # fbdev path: target 58fps (1000/58=17ms → 58.8fps, just below 60Hz display
         # rate so the write never catches the scan — no rolling tear line).
-        if not (drew and fb and fb.paces_loop):
+        if not (drew and fb and fb.paces_loop) or (drew and fps < 60):
             clock.tick(min(fps, 58) if drew else min(fps, 15))
 
     log.info("Shutting down")
