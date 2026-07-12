@@ -564,20 +564,34 @@ class App:
 
     def _apply_spotify_bitrate(self, bitrate: str):
         """Write bitrate to mopidy.conf and restart the mopidy service."""
-        import configparser, subprocess
+        import subprocess
         conf_path = os.path.expanduser("~/.config/mopidy/mopidy.conf")
-        cfg = configparser.ConfigParser()
-        cfg.read(conf_path)
-        if not cfg.has_section("spotify"):
-            cfg.add_section("spotify")
-        cfg.set("spotify", "bitrate", bitrate)
         try:
+            with open(conf_path) as f:
+                lines = f.readlines()
+            # Update or insert 'bitrate' inside the [spotify] section only.
+            in_spotify = False
+            found = False
+            out = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("["):
+                    if in_spotify and not found:
+                        out.append(f"bitrate = {bitrate}\n")
+                        found = True
+                    in_spotify = stripped == "[spotify]"
+                if in_spotify and stripped.startswith("bitrate"):
+                    out.append(f"bitrate = {bitrate}\n")
+                    found = True
+                    continue
+                out.append(line)
+            if in_spotify and not found:
+                out.append(f"bitrate = {bitrate}\n")
             with open(conf_path, "w") as f:
-                cfg.write(f)
+                f.writelines(out)
         except Exception as e:
             log.warning("Could not write mopidy.conf: %s", e)
             return
-        # Try user service first, fall back to system service
         for cmd in (["systemctl", "--user", "restart", "mopidy"],
                     ["sudo", "systemctl", "restart", "mopidy"]):
             r = subprocess.run(cmd, capture_output=True)
