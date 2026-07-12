@@ -234,6 +234,9 @@ _SETTINGS_ITEMS = [
     (None,          "PERFORMANCE"),
     ("idle_fps",    "Reduce FPS when idle"),
     ("skip_draw",   "Skip redraw when nothing changed"),
+    (None,          "CAROUSEL BENCH"),
+    ("car_fast",    "Fast perspective (N=8, was N=32)"),
+    ("car_cache",   "Cache pre-rendered album surfaces"),
 ]
 
 # Keyboard rows: list of (label, weight).  Special labels: SHIFT BACK OK SPACE SYM ABC
@@ -330,6 +333,11 @@ class App:
         self._carousel_pos:        float = 0.0   # smooth current position (float album index)
         self._carousel_pos_t:      float = 0.0   # snapped target (integer album index)
         self._carousel_drag_start: float = 0.0   # carousel_pos captured at touch-start
+        # keyed by (album_idx, w, near_h, far_h, N) →
+        #   (surf, [(refl_surf, rel_dx, rel_dy), ...])
+        # rel coords are offsets from (x - w//2, floor_y) so cached blits
+        # only need the current x position, not recomputed geometry.
+        self._car_surf_cache: dict[tuple, tuple] = {}
 
         # settings return target
         self._settings_return: View = View.GRID
@@ -583,6 +591,9 @@ class App:
         album["thumb_loading"]  = False
         self._thumbs_pending    = max(0, self._thumbs_pending - 1)
         self._dirty             = True
+        # Invalidate any cached carousel surfaces for this album.
+        for k in [k for k in self._car_surf_cache if k[0] == idx]:
+            del self._car_surf_cache[k]
 
     # ── album art ─────────────────────────────────────────────────────────────
 
@@ -1093,23 +1104,30 @@ class App:
         # column's actual bottom y, so the reflection seamlessly meets the
         # album edge at every point. Each column uses a solid (non-SRCALPHA)
         # Surface so front reflections completely cover rear ones.
+        N         = 8 if settings.get("car_fast") else _CAR_PERSP_N
+        use_cache = settings.get("car_cache")
+
         surfs = []
         for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
             self._queue_thumb(i)
             thumb  = self._albums[i].get("thumb")
             max_h  = near_h   # near_h >= far_h always
-            album_blit_y = floor_y - max_h   # where surf lands in pass 2
+            album_blit_y = floor_y - max_h
+            blit_x = x - w // 2
 
-            if thumb:
+            cache_key = (i, w, near_h, far_h, N)
+            if use_cache and thumb and cache_key in self._car_surf_cache:
+                surf, refl_data = self._car_surf_cache[cache_key]
+                for refl_col, rdx, rdy in refl_data:
+                    self.screen.blit(refl_col, (blit_x + rdx, floor_y + rdy))
+            elif thumb:
                 tw, th = thumb.get_size()
+                refl_data = []
 
                 if near_h == far_h:
-                    # Centre album: plain scale, no perspective.
                     surf = pygame.Surface((w, near_h))
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
-                    # Reflection: take the actual bottom _CAR_REFL_H rows of the
-                    # album (no scale/compression), matching the side-album approach.
                     refl_surf = pygame.Surface((w, _CAR_REFL_H))
                     refl_surf.fill(COL_BG)
                     rh = min(near_h, _CAR_REFL_H)
@@ -1117,24 +1135,18 @@ class App:
                         surf.subsurface((0, near_h - rh, w, rh)), False, True)
                     piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                     refl_surf.blit(piece, (0, 0))
-                    self.screen.blit(refl_surf, (x - w // 2, floor_y))
+                    self.screen.blit(refl_surf, (blit_x, floor_y))
+                    refl_data = [(refl_surf, 0, 0)]
                 else:
-                    # Side album: _CAR_PERSP_N centre-aligned strips.
-                    # SRCALPHA with transparent background so the COL_BG
-                    # padding around each strip doesn't overwrite the
-                    # reflection drawn beneath the album in pass 1.
                     surf = pygame.Surface((w, max_h), pygame.SRCALPHA)
                     r, g, b = COL_BG
                     surf.fill((r, g, b, 0))
-                    N          = _CAR_PERSP_N
                     shadow_max = int(130 * (1.0 - compress))
                     for col in range(N):
-                        # t_persp=0 → outer (near, tall, lit)
-                        # t_persp=1 → inner (far, short, dark)
                         t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
                                   else (col / max(1, N - 1))
                         col_h   = max(1, int(far_h + (near_h - far_h) * (1.0 - t_persp)))
-                        dst_y   = (max_h - col_h) // 2   # centre-aligned → angled top+bottom
+                        dst_y   = (max_h - col_h) // 2
                         src_x   = int(col * tw / N)
                         src_w   = max(1, int((col + 1) * tw / N) - src_x)
                         dst_x   = int(col * w / N)
@@ -1146,8 +1158,6 @@ class App:
                         if shadow_a > 0:
                             df = max(0, 255 - shadow_a)
                             strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
-                        # Reflection drawn at the column's actual bottom screen y so
-                        # the reflection meets the album edge at every column.
                         col_bottom_y = album_blit_y + dst_y + col_h
                         rh = min(col_h, _CAR_REFL_H)
                         refl_col = pygame.Surface((dst_w, _CAR_REFL_H))
@@ -1157,8 +1167,13 @@ class App:
                             False, True)
                         flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                         refl_col.blit(flipped, (0, 0))
-                        self.screen.blit(refl_col, (x - w // 2 + dst_x, col_bottom_y))
+                        self.screen.blit(refl_col, (blit_x + dst_x, col_bottom_y))
+                        # store relative coords for cache replay
+                        refl_data.append((refl_col, dst_x, col_bottom_y - floor_y))
                         surf.blit(strip, (dst_x, dst_y))
+
+                if use_cache:
+                    self._car_surf_cache[cache_key] = (surf, refl_data)
             else:
                 surf = pygame.Surface((w, near_h))
                 surf.fill(COL_CELL_BG)
