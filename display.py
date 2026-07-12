@@ -1169,10 +1169,9 @@ class App:
                     else:
                         surf = pygame.Surface((w, max_h))
                         surf.fill(COL_BG)
-                    if _refl:
-                        composite_h  = _CAR_REFL_H + refl_y_off
-                        refl_comp    = pygame.Surface((w, composite_h))
-                        refl_comp.fill(COL_BG)
+                    composite_h  = _CAR_REFL_H + refl_y_off
+                    refl_comp    = pygame.Surface((w, composite_h))
+                    refl_comp.fill(COL_BG)
                     album_blit_y = floor_y - max_h
                     for col in range(N):
                         t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
