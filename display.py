@@ -3329,7 +3329,14 @@ class App:
                     self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
                     self._song_guard_file = track.get("file", "")
-                    self._song = self.player.get_current_song()
+                    # Set directly — player._song may be overwritten by the poll
+                    # thread between play_track_in_queue and get_current_song().
+                    self._song = {
+                        "title":  track.get("title", ""),
+                        "artist": track.get("artist", ""),
+                        "album":  track.get("album", ""),
+                        "file":   track.get("file", ""),
+                    }
 
     def _exec_double_tap(self):
         if self._view in (View.ALBUM, View.TRACKLIST):
