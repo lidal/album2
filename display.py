@@ -106,7 +106,7 @@ _CAR_CAM_D        = 1500   # virtual camera distance (px) — controls perspecti
 _CAR_PERSP_N      = 32     # vertical strips for trapezoidal perspective simulation
 _CAR_SIDE_SCALE   = 0.84   # overall height scale for side albums (tall edge < center SIZE)
 # x-centre offsets from W//2 at integer distances 0, 1, 2.
-_CAR_AX           = (0, 200, 265)
+_CAR_AX           = (0, 270, 355)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
