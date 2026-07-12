@@ -185,6 +185,67 @@ def m_numpy_vectorized(thumb, d, N=N_STRIPS):
     out[valid] = shaded[valid]
     return pygame.surfarray.make_surface(out)
 
+def m_strips_noshadow(thumb, d, N=N_STRIPS, smooth=True):
+    """N strips, no shadow — isolates strip-smoothscale cost without BLEND_MULT."""
+    w, near_h, far_h, compress = slot(d)
+    max_h = near_h
+    tw, th = thumb.get_size()
+    surf   = pygame.Surface((w, max_h))
+    surf.fill(COL_BG)
+    sfn    = pygame.transform.smoothscale if smooth else pygame.transform.scale
+    for col in range(N):
+        t  = (1.0 - col / max(1, N-1)) if d > 0 else (col / max(1, N-1))
+        ch = max(1, int(far_h + (near_h - far_h) * (1.0 - t)))
+        dy = (max_h - ch) // 2
+        sx = int(col * tw / N);  sw = max(1, int((col+1) * tw / N) - sx)
+        dx = int(col * w  / N);  dw = max(1, int((col+1) * w  / N) - dx)
+        surf.blit(sfn(thumb.subsurface((sx, 0, sw, th)), (dw, ch)), (dx, dy))
+    return surf
+
+def m_single_smooth_noshadow_n(thumb, d, N=N_STRIPS):
+    """Single smoothscale + N clips, no shadow — variable N."""
+    w, near_h, far_h, compress = slot(d)
+    max_h = near_h
+    big   = pygame.transform.smoothscale(thumb, (w, max_h))
+    surf  = pygame.Surface((w, max_h))
+    surf.fill(COL_BG)
+    for col in range(N):
+        t  = (1.0 - col / max(1, N-1)) if d > 0 else (col / max(1, N-1))
+        ch = max(1, int(far_h + (near_h - far_h) * (1.0 - t)))
+        dy = (max_h - ch) // 2
+        dx = int(col * w / N);  dw = max(1, int((col+1) * w / N) - dx)
+        surf.blit(big, (dx, dy), area=(dx, dy, dw, ch))
+    return surf
+
+def m_gradient_shadow(thumb, d, N=N_STRIPS):
+    """Single smoothscale + numpy gradient shadow (1 BLEND_MULT blit) + N clips.
+    Replaces 128 copy()+fill(BLEND_MULT) with 1 numpy op + 1 blit.
+    Visual quality: correct shadow gradient, approximate perspective (uniform V scale)."""
+    import numpy as np
+    w, near_h, far_h, compress = slot(d)
+    max_h = near_h
+    big   = pygame.transform.smoothscale(thumb, (w, max_h))
+    shmax = int(130 * (1.0 - compress))
+    if shmax > 0:
+        # Build a (w,1) multiply-mask and scale it to (w, max_h)
+        col_idx = np.clip((np.arange(w) * N / w).astype(np.int32), 0, N - 1)
+        t_arr   = (1.0 - col_idx / max(1, N - 1)) if d > 0 \
+                  else col_idx.astype(np.float32) / max(1, N - 1)
+        df_arr  = np.maximum(0, 255 - (shmax * t_arr).astype(np.int32)).astype(np.uint8)
+        mask_col = np.empty((w, 1, 3), dtype=np.uint8)
+        mask_col[:, 0, :] = df_arr[:, np.newaxis]
+        smask   = pygame.transform.scale(pygame.surfarray.make_surface(mask_col), (w, max_h))
+        big.blit(smask, (0, 0), special_flags=pygame.BLEND_MULT)
+    surf  = pygame.Surface((w, max_h))
+    surf.fill(COL_BG)
+    for col in range(N):
+        t  = (1.0 - col / max(1, N-1)) if d > 0 else (col / max(1, N-1))
+        ch = max(1, int(far_h + (near_h - far_h) * (1.0 - t)))
+        dy = (max_h - ch) // 2
+        dx = int(col * w / N);  dw = max(1, int((col+1) * w / N) - dx)
+        surf.blit(big, (dx, dy), area=(dx, dy, dw, ch))
+    return surf
+
 # ── full-frame helper ─────────────────────────────────────────────────────────
 def full_frame(side_fn, ds, thumb):
     """Render one complete carousel frame: fill + all albums blitted to screen."""
@@ -256,29 +317,45 @@ def main():
               lambda ds=ds: full_frame(lambda t, d: m_single_smooth_noshadow(t, d),
                                        ds, t_small), reps)
 
-        # pre-scaled 350×350 thumb
-        bench("prescaled 350px + strips N=32 smooth",
-              lambda ds=ds: full_frame(B(m_strips, 32, True),           ds, t_big),   reps)
-        bench("prescaled 350px + strips N=8  smooth",
-              lambda ds=ds: full_frame(B(m_strips, 8,  True),           ds, t_big),   reps)
-
-        # numpy methods
+        # strips without shadow — isolates smoothscale cost vs BLEND_MULT cost
         if HAS_NP:
-            bench("numpy loop N=32",
-                  lambda ds=ds: full_frame(B(m_numpy_loop, 32),         ds, t_small), reps)
-            bench("numpy loop N=8",
-                  lambda ds=ds: full_frame(B(m_numpy_loop, 8),          ds, t_small), reps)
-            bench("numpy vectorized N=32  (no Python strip loop)",
-                  lambda ds=ds: full_frame(B(m_numpy_vectorized, 32),   ds, t_small), reps)
-            bench("numpy vectorized N=8",
-                  lambda ds=ds: full_frame(B(m_numpy_vectorized, 8),    ds, t_small), reps)
+            bench("strips N=32 smooth  NO shadow",
+                  lambda ds=ds: full_frame(B(m_strips_noshadow, 32, True),   ds, t_small), reps)
+            bench("strips N=8  smooth  NO shadow",
+                  lambda ds=ds: full_frame(B(m_strips_noshadow, 8,  True),   ds, t_small), reps)
+            bench("strips N=4  smooth  NO shadow",
+                  lambda ds=ds: full_frame(B(m_strips_noshadow, 4,  True),   ds, t_small), reps)
+            bench("strips N=4  scale   NO shadow",
+                  lambda ds=ds: full_frame(B(m_strips_noshadow, 4,  False),  ds, t_small), reps)
+
+            # single smooth + no shadow, variable N
+            bench("single smooth + N=8  clip NO shadow",
+                  lambda ds=ds: full_frame(B(m_single_smooth_noshadow_n, 8),  ds, t_small), reps)
+            bench("single smooth + N=4  clip NO shadow",
+                  lambda ds=ds: full_frame(B(m_single_smooth_noshadow_n, 4),  ds, t_small), reps)
+
+            # gradient shadow (1 numpy op + 1 BLEND_MULT blit) + clip strips
+            bench("gradient shadow + N=32 clips",
+                  lambda ds=ds: full_frame(B(m_gradient_shadow, 32),          ds, t_small), reps)
+            bench("gradient shadow + N=8  clips",
+                  lambda ds=ds: full_frame(B(m_gradient_shadow, 8),           ds, t_small), reps)
+            bench("gradient shadow + N=4  clips",
+                  lambda ds=ds: full_frame(B(m_gradient_shadow, 4),           ds, t_small), reps)
+
+            # 3 side albums instead of 4: reduce visibility threshold
+            ds3 = [d for d in ds if abs(d) <= 1.6]
+            bench(f"gradient shadow + N=8  — 3 albums (±1 only, d≤1.6)",
+                  lambda ds3=ds3: full_frame(B(m_gradient_shadow, 8),         ds3, t_small), reps)
+            bench(f"single smooth N=8 noshadow — 3 albums (±1 only)",
+                  lambda ds3=ds3: full_frame(B(m_single_smooth_noshadow_n, 8), ds3, t_small), reps)
 
         print()
 
     print("Notes:")
-    print("  'single smooth' has approximate perspective (width correct, height uniform)")
-    print("  'prescaled' thumb costs one extra smoothscale per album load (stored in album dict)")
-    print("  numpy methods may allocate large temporary arrays (~3 MB per album)")
+    print("  'single smooth' approximates perspective: correct width, uniform vertical scale")
+    print("  'gradient shadow' = 1 numpy mask + 1 BLEND_MULT blit vs N copy()+fill() per album")
+    print("  '3 albums' = visibility threshold 1.6 instead of 2.4 (only ±1 side album)")
+    print("  numpy methods may allocate large temporary arrays")
 
 if __name__ == "__main__":
     main()
