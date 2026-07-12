@@ -1151,7 +1151,7 @@ class App:
                     else:
                         piece = pygame.transform.flip(
                             surf.subsurface((0, near_h - rh, w, rh)), False, True)
-                        piece.set_alpha(80)
+                        piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                         self.screen.blit(piece, (blit_x, floor_y))
                 else:
                     # Side album: N perspective strips.  Animation: fewer strips,
@@ -1198,8 +1198,14 @@ class App:
                         refl_comp.blit(flipped,
                                        (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
-                        refl_comp.set_alpha(80)
-                    self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                        # Darken opaquely (not set_alpha — that causes see-through).
+                        # Clip to floor_y and below so the far-strip rows above floor_y
+                        # are not drawn where the center album body would cover them.
+                        refl_comp.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                        self.screen.blit(refl_comp, (blit_x, floor_y),
+                                         area=(0, refl_y_off, w, _CAR_REFL_H))
+                    else:
+                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
