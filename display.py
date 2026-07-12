@@ -235,6 +235,7 @@ _SETTINGS_ITEMS = [
     ("idle_fps",    "Reduce FPS when idle"),
     ("skip_draw",   "Skip redraw when nothing changed"),
     (None,          "CAROUSEL"),
+    ("car_reflections", "Show reflections"),
     ("car_cache",   "Cache pre-rendered album surfaces"),
 ]
 
@@ -1111,6 +1112,7 @@ class App:
         _settled  = (self._carousel_pos_t % 1.0 == 0.0
                      and self._carousel_pos == self._carousel_pos_t)
         use_cache = settings.get("car_cache") and _settled
+        _refl     = settings.get("car_reflections")
         # Animation uses fewer strips and skips reflections for speed.
         N = _CAR_PERSP_N if _settled else max(4, _CAR_PERSP_N // 2)
 
@@ -1129,7 +1131,8 @@ class App:
             cache_key = (i, w, near_h, far_h, d > 0)
             if use_cache and thumb and cache_key in self._car_surf_cache:
                 surf, refl_comp = self._car_surf_cache[cache_key]
-                self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                if _refl:
+                    self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
             elif thumb:
                 tw, th = thumb.get_size()
 
@@ -1143,12 +1146,13 @@ class App:
                         composite_h = _CAR_REFL_H + refl_y_off
                         refl_comp   = pygame.Surface((w, composite_h))
                         refl_comp.fill(COL_BG)
-                        piece = pygame.transform.flip(
-                            surf.subsurface((0, near_h - rh, w, rh)), False, True)
-                        piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                        refl_comp.blit(piece, (0, 0))
-                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
-                    else:
+                        if _refl:
+                            piece = pygame.transform.flip(
+                                surf.subsurface((0, near_h - rh, w, rh)), False, True)
+                            piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                            refl_comp.blit(piece, (0, 0))
+                            self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                    elif _refl:
                         piece = pygame.transform.flip(
                             surf.subsurface((0, near_h - rh, w, rh)), False, True)
                         piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
@@ -1165,9 +1169,10 @@ class App:
                     else:
                         surf = pygame.Surface((w, max_h))
                         surf.fill(COL_BG)
-                    composite_h  = _CAR_REFL_H + refl_y_off
-                    refl_comp    = pygame.Surface((w, composite_h))
-                    refl_comp.fill(COL_BG)
+                    if _refl:
+                        composite_h  = _CAR_REFL_H + refl_y_off
+                        refl_comp    = pygame.Surface((w, composite_h))
+                        refl_comp.fill(COL_BG)
                     album_blit_y = floor_y - max_h
                     for col in range(N):
                         t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
@@ -1182,18 +1187,21 @@ class App:
                                       thumb.subsurface((src_x, 0, src_w, th)),
                                       (dst_w, col_h))
                         surf.blit(strip, (dst_x, dst_y))
-                        col_bottom_y = album_blit_y + dst_y + col_h
-                        rh_strip = min(col_h, _CAR_REFL_H)
-                        flipped = pygame.transform.flip(
-                            strip.subsurface((0, col_h - rh_strip, dst_w, rh_strip)),
-                            False, True)
-                        flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                        refl_comp.blit(flipped,
-                                       (dst_x, col_bottom_y - floor_y + refl_y_off))
+                        if _refl:
+                            col_bottom_y = album_blit_y + dst_y + col_h
+                            rh_strip = min(col_h, _CAR_REFL_H)
+                            flipped = pygame.transform.flip(
+                                strip.subsurface((0, col_h - rh_strip, dst_w, rh_strip)),
+                                False, True)
+                            flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                            refl_comp.blit(flipped,
+                                           (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
                         surf.set_colorkey(COL_BG)
-                        refl_comp.set_colorkey(COL_BG)
-                    self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                    if _refl:
+                        if not _settled:
+                            refl_comp.set_colorkey(COL_BG)
+                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
@@ -1215,7 +1223,8 @@ class App:
             surfs.append((surf, alpha, x, max_h))
 
         # Fade mask erases reflections below floor_y (transparent at top → opaque).
-        self.screen.blit(self._refl_fade, (0, floor_y))
+        if _refl:
+            self.screen.blit(self._refl_fade, (0, floor_y))
 
         # Pass 2 — album bodies (far→near).
         # floor_y - max_h positions the near column's bottom exactly at floor_y.

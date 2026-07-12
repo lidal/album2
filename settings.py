@@ -16,6 +16,7 @@ _DEFAULTS: dict = {
     # screen_y = cal_sy * raw_y + cal_oy
     "cal_sx": 1.0, "cal_ox": 0.0,
     "cal_sy": 1.0, "cal_oy": 0.0,
+    "car_reflections": True,
 }
 
 _data: dict = {}
