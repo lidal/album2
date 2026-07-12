@@ -328,39 +328,30 @@ class MopidyPlayer:
 
     def _get_albums_spotify(self) -> list[dict]:
         """Return user's saved Spotify albums via Mopidy RPC, sorted by artist/album."""
-        refs = self._rpc("core.library.browse", uri="spotify:user:saved:albums") or []
-        album_uris = [r["uri"] for r in refs
-                      if r.get("type") == "album" and r.get("uri")]
-        if not album_uris:
-            log.warning("Spotify: no saved albums found (check credentials and saved library)")
-            return []
-        # Batch lookup all albums in one RPC call to get artist info
-        lookup = self._rpc("core.library.lookup", uris=album_uris) or {}
+        refs = self._rpc("core.library.browse", uri="spotify:your:albums") or []
         result = []
         for ref in refs:
             if ref.get("type") != "album":
                 continue
-            uri  = ref.get("uri", "")
-            name = ref.get("name", "").strip()
-            if not uri or not name:
+            uri      = ref.get("uri", "")
+            raw_name = ref.get("name", "").strip()
+            if not uri or not raw_name:
                 continue
-            tracks = lookup.get(uri, [])
-            artist = ""
-            if tracks:
-                t = tracks[0]
-                album_obj     = t.get("album") if isinstance(t.get("album"), dict) else {}
-                album_artists = album_obj.get("artists", [])
-                track_artists = t.get("artists", [])
-                artists       = album_artists or track_artists
-                artist        = artists[0].get("name", "") if artists else ""
+            # Browse returns "Artist - Album Name"; split on first " - "
+            if " - " in raw_name:
+                artist, album_name = raw_name.split(" - ", 1)
+            else:
+                artist, album_name = "", raw_name
             result.append({
-                "name":      name,
+                "name":      album_name,
                 "artist":    artist,
                 "year":      0,
                 "track_uri": uri,   # spotify:album:xxx — works with core.library.get_images
                 "tracks":    None,
                 "thumb":     None,
             })
+        if not result:
+            log.warning("Spotify: no saved albums found (check credentials and saved library)")
         return sorted(result, key=lambda x: (x["artist"].casefold(), x["name"].casefold()))
 
     def get_album_tracks(self, album: dict) -> list[dict]:
