@@ -1169,7 +1169,6 @@ class App:
                     refl_comp    = pygame.Surface((w, composite_h))
                     refl_comp.fill(COL_BG)
                     album_blit_y = floor_y - max_h
-                    shadow_max = int(130 * (1.0 - compress))
                     for col in range(N):
                         t_persp = (1.0 - col / max(1, N - 1)) if d > 0 \
                                   else (col / max(1, N - 1))
@@ -1182,11 +1181,6 @@ class App:
                         strip   = pygame.transform.smoothscale(
                                       thumb.subsurface((src_x, 0, src_w, th)),
                                       (dst_w, col_h))
-                        if _settled:
-                            shadow_a = int(shadow_max * t_persp)
-                            if shadow_a > 0:
-                                df = max(0, 255 - shadow_a)
-                                strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
                         surf.blit(strip, (dst_x, dst_y))
                         col_bottom_y = album_blit_y + dst_y + col_h
                         rh_strip = min(col_h, _CAR_REFL_H)
