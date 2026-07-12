@@ -477,6 +477,10 @@ class App:
         self._elapsed_base   = 0.0
         self._elapsed_base_t = time.monotonic()
         self._last_progress_px = -1   # last drawn progress bar pixel; avoids spurious dirty
+        # True while an album is loading — suppresses poll from overwriting elapsed with stale data
+        self._loading_album    = False
+        # monotonic deadline before which backwards elapsed jumps are ignored (post-seek buffer)
+        self._seek_guard_until = 0.0
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -844,10 +848,14 @@ class App:
             status = self.player.get_status()
             song   = self.player.get_current_song()
             self._status = status
-            # Snapshot elapsed for smooth interpolation between polls
+            # Snapshot elapsed for smooth interpolation between polls.
+            # Suppress while loading a new album (old track's elapsed bleeds in)
+            # or when elapsed jumps backwards right after a seek (Spotify rebuffers at 0).
             el = float(status.get("elapsed", 0) or 0)
-            self._elapsed_base   = el
-            self._elapsed_base_t = now
+            if not self._loading_album:
+                if el >= self._elapsed_base - 1.0 or now > self._seek_guard_until:
+                    self._elapsed_base   = el
+                    self._elapsed_base_t = now
             # Only overwrite _song if MPD returned something — don't clobber
             # our optimistic data while the track is still being queued.
             if song:
@@ -1573,7 +1581,8 @@ class App:
         self._album_y_t      = 0.0
         self._view           = View.ALBUM
         self._tl_scroll      = 0.0
-        # Reset progress so previous album's position doesn't carry over
+        # Suppress poll elapsed updates until the new track is queued at position 0
+        self._loading_album  = True
         self._elapsed_base   = 0.0
         self._elapsed_base_t = time.monotonic()
 
@@ -1612,6 +1621,9 @@ class App:
                     self.player.play_album(tracks, 0)
                 else:
                     self.player.load_album(tracks, 0)
+            self._loading_album  = False
+            self._elapsed_base   = 0.0
+            self._elapsed_base_t = time.monotonic()
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -3685,6 +3697,7 @@ class App:
                     dur = float(self._song.get("time", 0) or 0)
                 self._elapsed_base   = frac * dur
                 self._elapsed_base_t = time.monotonic()
+                self._seek_guard_until = time.monotonic() + 3.0
                 self._t_start_pos    = None
                 self._t_prev_pos     = None
                 self._t_dragging     = False
