@@ -231,6 +231,8 @@ _SETTINGS_ITEMS = [
     ("lyrics",      "Show lyrics"),
     (None,          "LIBRARY"),
     ("library",     "Library"),
+    (None,          "SPOTIFY"),
+    ("spotify_bitrate", "Bitrate"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
     ("carousel",    "Carousel view"),
@@ -245,7 +247,8 @@ _SETTINGS_ITEMS = [
 # Keys whose values are string options rather than booleans.
 # Tapping cycles to the next option; draw code renders a pill instead of a toggle.
 _SETTINGS_SELECTORS: dict[str, tuple[str, ...]] = {
-    "library": ("Local", "Spotify"),
+    "library":        ("Local", "Spotify"),
+    "spotify_bitrate": ("96", "160", "320"),
 }
 
 # Keyboard rows: list of (label, weight).  Special labels: SHIFT BACK OK SPACE SYM ABC
@@ -554,6 +557,30 @@ class App:
         log.info("Loaded %d albums from %s", len(albums), library)
         for i in range(len(albums)):
             self._queue_thumb(i)
+
+    def _apply_spotify_bitrate(self, bitrate: str):
+        """Write bitrate to mopidy.conf and restart the mopidy service."""
+        import configparser, subprocess
+        conf_path = os.path.expanduser("~/.config/mopidy/mopidy.conf")
+        cfg = configparser.ConfigParser()
+        cfg.read(conf_path)
+        if not cfg.has_section("spotify"):
+            cfg.add_section("spotify")
+        cfg.set("spotify", "bitrate", bitrate)
+        try:
+            with open(conf_path, "w") as f:
+                cfg.write(f)
+        except Exception as e:
+            log.warning("Could not write mopidy.conf: %s", e)
+            return
+        # Try user service first, fall back to system service
+        for cmd in (["systemctl", "--user", "restart", "mopidy"],
+                    ["sudo", "systemctl", "restart", "mopidy"]):
+            r = subprocess.run(cmd, capture_output=True)
+            if r.returncode == 0:
+                log.info("mopidy restarted for bitrate=%s", bitrate)
+                return
+        log.warning("Could not restart mopidy after bitrate change")
 
     def _reload_library(self):
         """Increment generation (aborts in-flight load) then reload album list."""
@@ -1604,22 +1631,34 @@ class App:
 
         # load tracks + pause at track 0 in background
         def _load():
-            tracks = self.player.get_album_tracks(album)
+            album_uri  = album.get("track_uri", "")
+            is_spotify = album_uri.startswith("spotify:album:")
+            autoplay   = settings.get("autoplay")
+
+            if is_spotify and autoplay:
+                # Fast path: single RPC add → play, no pre-lookup needed.
+                # core.tracklist.add returns tl_tracks with full metadata so we
+                # parse tracks for the UI from that same response.
+                tracks = self.player.play_album_fast(album_uri)
+            else:
+                tracks = self.player.get_album_tracks(album)
+
             album["tracks"] = tracks
             self._tracks = tracks
             if tracks:
                 t0 = tracks[0]
-                # Set title as soon as we know the first track — before load_album
-                # so controls overlay shows it immediately
                 self.player.set_song_optimistic({
                     "title":  t0.get("title", ""),
                     "artist": t0.get("artist") or t0.get("albumartist", album["artist"]),
                     "album":  t0.get("album", album["name"]),
                     "file":   t0.get("file", ""),
                 })
-                if settings.get("autoplay"):
-                    self.player.play_album(tracks, 0)
-                else:
+                if not is_spotify:
+                    if autoplay:
+                        self.player.play_album(tracks, 0)
+                    else:
+                        self.player.load_album(tracks, 0)
+                elif not autoplay:
                     self.player.load_album(tracks, 0)
             self._loading_album  = False
             self._elapsed_base   = 0.0
@@ -3050,6 +3089,10 @@ class App:
                                 settings.set(dk, opt.lower())
                                 if dk == "library":
                                     self._reload_library()
+                                elif dk == "spotify_bitrate":
+                                    threading.Thread(
+                                        target=self._apply_spotify_bitrate,
+                                        args=(opt.lower(),), daemon=True).start()
                                 self._settings_dropdown = None
                                 self._dirty = True
                                 return

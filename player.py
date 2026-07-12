@@ -426,22 +426,40 @@ class MopidyPlayer:
             })
         return sorted(result, key=lambda t: (int(t["disc"]), int(t["track"])))
 
+    def play_album_fast(self, album_uri: str) -> list[dict]:
+        """Add *album_uri* to tracklist and start playing immediately.
+
+        Uses a single core.tracklist.add(uri=...) call which is faster than
+        a separate library.lookup + N individual adds. Returns track dicts
+        parsed from the response so the caller can populate the UI.
+        """
+        self._rpc("core.tracklist.clear")
+        tl_tracks = self._rpc("core.tracklist.add", uri=album_uri) or []
+        tracks = []
+        for tlt in tl_tracks:
+            t       = tlt.get("track", {}) if isinstance(tlt, dict) else {}
+            artists = t.get("artists", [])
+            tracks.append({
+                "file":   t.get("uri", ""),
+                "title":  t.get("name", ""),
+                "artist": artists[0].get("name", "") if artists else "",
+                "album":  (t.get("album") or {}).get("name", ""),
+                "track":  t.get("track_no") or 0,
+                "disc":   t.get("disc_no")  or 1,
+            })
+        if tl_tracks:
+            self._rpc("core.playback.play", tlid=tl_tracks[0]["tlid"])
+            with self._ctrl_lock:
+                self._status["state"] = "play"
+        return sorted(tracks, key=lambda t: (int(t["disc"]), int(t["track"])))
+
     def load_album(self, tracks: list[dict], track_index: int = 0):
         """Replace queue with *tracks*, seek to *track_index*, and pause."""
         if not tracks:
             return
         uris = [t["file"] for t in tracks if "file" in t]
-
-        def _q(c):
-            c.clear()
-            for u in uris:
-                c.add(u)
-
-        self._browse(_q)
-        # Use RPC to start the track then pause it.  We must wait for mopidy to
-        # reach PLAYING state before pausing — the GStreamer pipeline takes a
-        # moment to start, so an immediate pause() call races and loses.
-        tl_tracks = self._rpc("core.tracklist.get_tl_tracks")
+        self._rpc("core.tracklist.clear")
+        tl_tracks = self._rpc("core.tracklist.add", uris=uris) or []
         if tl_tracks and 0 <= track_index < len(tl_tracks):
             self._rpc("core.playback.play", tlid=tl_tracks[track_index]["tlid"])
             for _ in range(20):
@@ -457,14 +475,8 @@ class MopidyPlayer:
         if not tracks:
             return
         uris = [t["file"] for t in tracks if "file" in t]
-
-        def _q(c):
-            c.clear()
-            for u in uris:
-                c.add(u)
-
-        self._browse(_q)
-        tl_tracks = self._rpc("core.tracklist.get_tl_tracks")
+        self._rpc("core.tracklist.clear")
+        tl_tracks = self._rpc("core.tracklist.add", uris=uris) or []
         if tl_tracks and 0 <= track_index < len(tl_tracks):
             self._rpc("core.playback.play", tlid=tl_tracks[track_index]["tlid"])
         with self._ctrl_lock:

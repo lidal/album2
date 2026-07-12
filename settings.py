@@ -18,6 +18,7 @@ _DEFAULTS: dict = {
     "cal_sy": 1.0, "cal_oy": 0.0,
     "car_reflections":  True,
     "library":          "local",
+    "spotify_bitrate":  "160",
 }
 
 _data: dict = {}
