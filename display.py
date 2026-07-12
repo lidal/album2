@@ -414,7 +414,8 @@ class App:
         # scroll offsets
         self._grid_scroll:     float = 0.0
         self._tl_scroll:       float = 0.0
-        self._settings_scroll: float = 0.0
+        self._settings_scroll:   float = 0.0
+        self._settings_dropdown: str | None = None   # key of open selector dropdown
 
         # scroll momentum (px/s, decays each frame)
         self._grid_vel:     float = 0.0
@@ -464,6 +465,8 @@ class App:
         if volume_ctrl.available:
             volume_ctrl.set_on_change(self._on_volume)
 
+        self._load_gen: int = 0   # incremented on each library reload; stale threads check this
+
         # status cache
         self._status: dict = {}
         self._song:   dict = {}
@@ -479,7 +482,7 @@ class App:
         self._thumb_queued:   set[int] = set()
         self._thumbs_pending: int      = 0   # number of thumbs still in flight
 
-        threading.Thread(target=self._load_albums, daemon=True).start()
+        threading.Thread(target=self._load_albums, args=(self._load_gen,), daemon=True).start()
 
     # ── default background ────────────────────────────────────────────────────
 
@@ -535,23 +538,28 @@ class App:
 
     # ── album list + thumbnails ───────────────────────────────────────────────
 
-    def _load_albums(self):
+    def _load_albums(self, gen: int):
         library = settings.get("library") or "local"
-        self._albums          = self.player.get_albums(library=library)
-        self._thumbs_pending  = len(self._albums)
-        self._dirty           = True
-        log.info("Loaded %d albums from %s", len(self._albums), library)
-        for i in range(len(self._albums)):
+        albums = self.player.get_albums(library=library)
+        if self._load_gen != gen:   # library switched while we were loading — discard
+            return
+        self._albums         = albums
+        self._thumbs_pending = len(albums)
+        self._dirty          = True
+        log.info("Loaded %d albums from %s", len(albums), library)
+        for i in range(len(albums)):
             self._queue_thumb(i)
 
     def _reload_library(self):
-        """Switch library source and reload album list."""
+        """Increment generation (aborts in-flight load) then reload album list."""
+        self._load_gen += 1
+        gen = self._load_gen
         self._albums = []
         self._thumb_queued.clear()
         self._thumbs_pending = 0
         self._car_surf_cache.clear()
         self._dirty = True
-        threading.Thread(target=self._load_albums, daemon=True).start()
+        threading.Thread(target=self._load_albums, args=(gen,), daemon=True).start()
 
     def _queue_thumb(self, idx: int):
         if idx in self._thumb_queued:
@@ -717,6 +725,8 @@ class App:
                 self._settings_scroll = max(0.0, self._settings_scroll + self._settings_vel * dt)
                 self._settings_vel   *= friction
                 self._dirty = True
+                if self._settings_dropdown:
+                    self._settings_dropdown = None
             else:
                 self._settings_vel = 0.0
 
@@ -2217,16 +2227,38 @@ class App:
             elif key in _SETTINGS_SELECTORS:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
-                cur = str(settings.get(key)).capitalize()
-                pt  = _render_text(self._f_track_sm, cur, COL_BG)
-                pw  = pt.get_width() + 24
-                ph  = TOGGLE_H
-                px  = W - BTN_MARGIN - pw
-                py2 = y + (TRACK_ROW_H - ph) // 2
+                cur  = str(settings.get(key)).capitalize()
+                open_ = self._settings_dropdown == key
+                pt   = _render_text(self._f_track_sm, cur + ("  ▲" if open_ else "  ▼"), COL_BG)
+                pw   = pt.get_width() + 24
+                ph   = TOGGLE_H
+                px   = W - BTN_MARGIN - pw
+                py2  = y + (TRACK_ROW_H - ph) // 2
                 pygame.draw.rect(self.screen, COL_HIGHLIGHT, (px, py2, pw, ph),
                                  border_radius=ph // 2)
                 self.screen.blit(pt, (px + (pw - pt.get_width()) // 2,
                                       py2 + (ph - pt.get_height()) // 2))
+                if open_:
+                    opts     = _SETTINGS_SELECTORS[key]
+                    cur_low  = str(settings.get(key)).lower()
+                    dp_w     = max(pw + 40, 160)
+                    dp_x     = W - BTN_MARGIN - dp_w
+                    dp_y     = y + TRACK_ROW_H
+                    dp_h     = len(opts) * TRACK_ROW_H
+                    pygame.draw.rect(self.screen, COL_CELL_BG,
+                                     (dp_x, dp_y, dp_w, dp_h), border_radius=6)
+                    pygame.draw.rect(self.screen, COL_SEP,
+                                     (dp_x, dp_y, dp_w, dp_h), 1, border_radius=6)
+                    for oi, opt in enumerate(opts):
+                        oy  = dp_y + oi * TRACK_ROW_H
+                        sel = opt.lower() == cur_low
+                        oc  = COL_HIGHLIGHT if sel else COL_TRACK_NORMAL
+                        ot  = _render_text(self._f_track, opt, oc)
+                        self.screen.blit(ot, (dp_x + 16,
+                                              oy + (TRACK_ROW_H - ot.get_height()) // 2))
+                        if oi:
+                            pygame.draw.line(self.screen, COL_SEP,
+                                             (dp_x, oy), (dp_x + dp_w, oy))
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
@@ -2973,12 +3005,35 @@ class App:
             if self._settings_back_btn_hit(pos):
                 self._close_settings()
                 return
+            # If a dropdown is open, check for option tap or dismiss
+            if self._settings_dropdown:
+                dk = self._settings_dropdown
+                opts = _SETTINGS_SELECTORS[dk]
+                # Find the row index of the open dropdown key
+                for ri, (rk, _) in enumerate(_SETTINGS_ITEMS):
+                    if rk == dk:
+                        row_y = self._settings_row_y(ri)
+                        dp_w  = 160
+                        dp_x  = W - BTN_MARGIN - dp_w
+                        dp_y  = row_y + TRACK_ROW_H
+                        for oi, opt in enumerate(opts):
+                            oy = dp_y + oi * TRACK_ROW_H
+                            if dp_x <= pos[0] <= W and oy <= pos[1] <= oy + TRACK_ROW_H:
+                                settings.set(dk, opt.lower())
+                                if dk == "library":
+                                    self._reload_library()
+                                self._settings_dropdown = None
+                                self._dirty = True
+                                return
+                        break
+                self._settings_dropdown = None
+                self._dirty = True
+                return
             key = self._settings_item_at(pos)
             if key:
                 if key in _SETTINGS_SELECTORS:
-                    settings.cycle(key, _SETTINGS_SELECTORS[key])
-                    if key == "library":
-                        self._reload_library()
+                    self._settings_dropdown = key if self._settings_dropdown != key else None
+                    self._dirty = True
                 else:
                     settings.toggle(key)
                     if key == "carousel":
