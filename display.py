@@ -1138,16 +1138,21 @@ class App:
                     surf = pygame.Surface((w, near_h))
                     surf.fill(COL_BG)
                     surf.blit(pygame.transform.smoothscale(thumb, (w, near_h)), (0, 0))
+                    rh = min(near_h, _CAR_REFL_H)
                     if _settled:
                         composite_h = _CAR_REFL_H + refl_y_off
                         refl_comp   = pygame.Surface((w, composite_h))
                         refl_comp.fill(COL_BG)
-                        rh = min(near_h, _CAR_REFL_H)
                         piece = pygame.transform.flip(
                             surf.subsurface((0, near_h - rh, w, rh)), False, True)
                         piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                         refl_comp.blit(piece, (0, 0))
                         self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                    else:
+                        piece = pygame.transform.flip(
+                            surf.subsurface((0, near_h - rh, w, rh)), False, True)
+                        piece.set_alpha(80)
+                        self.screen.blit(piece, (blit_x, floor_y))
                 else:
                     # Side album: N perspective strips.  Animation: fewer strips,
                     # no SRCALPHA (avoids per-pixel alpha cost), no reflections.
@@ -1195,12 +1200,14 @@ class App:
                     if _settled:
                         self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
                     else:
-                        # Cheap animation reflection: single flip of bottom rows,
-                        # no per-strip BLEND_MULT — refl_fade mask handles the fade.
-                        rh = min(max_h, _CAR_REFL_H + refl_y_off)
+                        # Cheap animation reflection: single flip of bottom rows.
+                        # Blit at floor_y (not floor_y-refl_y_off) so no pixels
+                        # appear above floor where the center album body covers them.
+                        rh = min(max_h, _CAR_REFL_H)
                         anim_refl = pygame.transform.flip(
                             surf.subsurface((0, max_h - rh, w, rh)), False, True)
-                        self.screen.blit(anim_refl, (blit_x, floor_y - refl_y_off))
+                        anim_refl.set_alpha(80)
+                        self.screen.blit(anim_refl, (blit_x, floor_y))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
