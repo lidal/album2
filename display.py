@@ -1112,7 +1112,7 @@ class App:
                      and self._carousel_pos == self._carousel_pos_t)
         use_cache = settings.get("car_cache") and _settled
         # Animation uses fewer strips and skips reflections for speed.
-        N = _CAR_PERSP_N if _settled else max(4, _CAR_PERSP_N // 4)
+        N = _CAR_PERSP_N if _settled else max(4, _CAR_PERSP_N // 2)
 
         surfs = []
         for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
