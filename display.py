@@ -484,10 +484,11 @@ class App:
         self._loading_album    = False
         # monotonic deadline before which backwards elapsed jumps are ignored (post-seek buffer)
         self._seek_guard_until = 0.0
-        # URI we expect to see in currentsong after a track tap; poll skips _song
-        # updates until MPD reports this URI (or it's cleared), so we never
-        # flash back to the previous track while the command is in flight.
-        self._song_guard_file: str = ""
+        # URI we expect after a track tap; poll skips _song updates until MPD
+        # reports this URI. After confirmation, a 1s cooldown blocks any further
+        # file changes so Spotify buffering churn can't revert the display.
+        self._song_guard_file: str    = ""
+        self._song_guard_until: float = 0.0
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -906,8 +907,16 @@ class App:
             # this prevents the display reverting to the old track while
             # core.playback.play is still in flight (however long that takes).
             if song:
-                if not self._song_guard_file or song.get("file") == self._song_guard_file:
-                    self._song_guard_file = ""
+                f = song.get("file", "")
+                if self._song_guard_file:
+                    if f == self._song_guard_file:
+                        self._song_guard_file  = ""
+                        self._song_guard_until = now + 1.0
+                        self._song = song
+                    # else: guard active, wrong file → skip
+                elif now < self._song_guard_until and f != self._song.get("file"):
+                    pass  # post-confirm hold: block file changes for 1s
+                else:
                     self._song = song
             new_uri = self._song.get("file", "")
             # re-fetch art if track changed while album view is open
