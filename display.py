@@ -228,6 +228,8 @@ _SETTINGS_ITEMS = [
     (None,          "PLAYBACK"),
     ("autoplay",    "Autoplay when opening album"),
     ("lyrics",      "Show lyrics"),
+    (None,          "LIBRARY"),
+    ("spotify_library", "Use Spotify library"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
     ("carousel",    "Carousel view"),
@@ -528,12 +530,22 @@ class App:
     # ── album list + thumbnails ───────────────────────────────────────────────
 
     def _load_albums(self):
-        self._albums          = self.player.get_albums()
+        library = "spotify" if settings.get("spotify_library") else "local"
+        self._albums          = self.player.get_albums(library=library)
         self._thumbs_pending  = len(self._albums)
         self._dirty           = True
-        log.info("Loaded %d albums", len(self._albums))
+        log.info("Loaded %d albums from %s", len(self._albums), library)
         for i in range(len(self._albums)):
             self._queue_thumb(i)
+
+    def _reload_library(self):
+        """Switch library source and reload album list."""
+        self._albums = []
+        self._thumb_queued.clear()
+        self._thumbs_pending = 0
+        self._car_surf_cache.clear()
+        self._dirty = True
+        threading.Thread(target=self._load_albums, daemon=True).start()
 
     def _queue_thumb(self, idx: int):
         if idx in self._thumb_queued:
@@ -2946,8 +2958,9 @@ class App:
             if key:
                 settings.toggle(key)
                 if key == "carousel":
-                    # update return-view so closing settings lands in the right mode
                     self._settings_return = self._browse_view()
+                elif key == "spotify_library":
+                    self._reload_library()
                 return
             if self._settings_bt_power_toggle_at(pos):
                 new_val = not self._bt_powered
