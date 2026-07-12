@@ -1197,6 +1197,7 @@ class App:
                         refl_comp.blit(flipped,
                                        (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
+                        surf.set_colorkey(COL_BG)
                         refl_comp.set_colorkey(COL_BG)
                     self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
 
