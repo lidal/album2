@@ -1115,7 +1115,6 @@ class App:
         N = _CAR_PERSP_N if _settled else max(4, _CAR_PERSP_N // 4)
 
         surfs = []
-        refl_list = []   # [(surf, (x, y))] — blitted after pass 2, before refl_fade
         for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
             self._queue_thumb(i)
             thumb  = self._albums[i].get("thumb")
@@ -1130,7 +1129,7 @@ class App:
             cache_key = (i, w, near_h, far_h, d > 0)
             if use_cache and thumb and cache_key in self._car_surf_cache:
                 surf, refl_comp = self._car_surf_cache[cache_key]
-                refl_list.append((refl_comp, (blit_x, floor_y - refl_y_off)))
+                self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
             elif thumb:
                 tw, th = thumb.get_size()
 
@@ -1148,12 +1147,12 @@ class App:
                             surf.subsurface((0, near_h - rh, w, rh)), False, True)
                         piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                         refl_comp.blit(piece, (0, 0))
-                        refl_list.append((refl_comp, (blit_x, floor_y - refl_y_off)))
+                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
                     else:
                         piece = pygame.transform.flip(
                             surf.subsurface((0, near_h - rh, w, rh)), False, True)
                         piece.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                        refl_list.append((piece, (blit_x, floor_y)))
+                        self.screen.blit(piece, (blit_x, floor_y))
                 else:
                     # Side album: N perspective strips.  Animation: fewer strips,
                     # no SRCALPHA (avoids per-pixel alpha cost), no reflections.
@@ -1199,8 +1198,14 @@ class App:
                         refl_comp.blit(flipped,
                                        (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
+                        # Darken opaquely (not set_alpha — that causes see-through).
+                        # Clip to floor_y and below so the far-strip rows above floor_y
+                        # are not drawn where the center album body would cover them.
                         refl_comp.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
-                    refl_list.append((refl_comp, (blit_x, floor_y - refl_y_off)))
+                        self.screen.blit(refl_comp, (blit_x, floor_y),
+                                         area=(0, refl_y_off, w, _CAR_REFL_H))
+                    else:
+                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
@@ -1221,6 +1226,9 @@ class App:
 
             surfs.append((surf, alpha, x, max_h))
 
+        # Fade mask erases reflections below floor_y (transparent at top → opaque).
+        self.screen.blit(self._refl_fade, (0, floor_y))
+
         # Pass 2 — album bodies (far→near).
         # floor_y - max_h positions the near column's bottom exactly at floor_y.
         # Never mutate a cached surface: copy before applying alpha.
@@ -1229,13 +1237,6 @@ class App:
                 surf = surf.copy()
                 surf.set_alpha(alpha)
             self.screen.blit(surf, (x - surf.get_width() // 2, floor_y - max_h))
-
-        # Reflections drawn after album bodies so the center album body doesn't
-        # cover them. Above-floor portion of refl_comp is near-black after
-        # BLEND_MULT so invisible over album art. Fade mask applied last.
-        for refl, pos in refl_list:
-            self.screen.blit(refl, pos)
-        self.screen.blit(self._refl_fade, (0, floor_y))
 
         # Name + artist centred below the album strip.
         c   = self._albums[center_idx]
