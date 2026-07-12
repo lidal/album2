@@ -903,6 +903,9 @@ class App:
             return FPS
         if pygame.time.get_ticks() - self._last_input_ms < 5000:
             return FPS
+        if (self._view == View.ALBUM and self._lyrics_parsed
+                and settings.get("lyrics")):
+            return FPS
         return FPS if self._dirty else 10
 
     def draw(self) -> bool:
