@@ -484,8 +484,10 @@ class App:
         self._loading_album    = False
         # monotonic deadline before which backwards elapsed jumps are ignored (post-seek buffer)
         self._seek_guard_until = 0.0
-        # monotonic deadline before which poll may not overwrite _song (post-track-switch)
-        self._song_guard_until = 0.0
+        # URI we expect to see in currentsong after a track tap; poll skips _song
+        # updates until MPD reports this URI (or it's cleared), so we never
+        # flash back to the previous track while the command is in flight.
+        self._song_guard_file: str = ""
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -885,11 +887,14 @@ class App:
                 if el >= self._elapsed_base - 1.0 or now > self._seek_guard_until:
                     self._elapsed_base   = el
                     self._elapsed_base_t = now
-            # Only overwrite _song if MPD returned something and the guard has
-            # expired — prevents MPD's stale currentsong from reverting an
-            # optimistic track switch for the ~1s until MPD catches up.
-            if song and now > self._song_guard_until:
-                self._song = song
+            # Only overwrite _song once MPD reports the track we expect.
+            # While _song_guard_file is set, ignore updates that don't match —
+            # this prevents the display reverting to the old track while
+            # core.playback.play is still in flight (however long that takes).
+            if song:
+                if not self._song_guard_file or song.get("file") == self._song_guard_file:
+                    self._song_guard_file = ""
+                    self._song = song
             new_uri = self._song.get("file", "")
             # re-fetch art if track changed while album view is open
             if (new_uri and new_uri != self._art_uri
@@ -3309,7 +3314,7 @@ class App:
                     track = self._tracks[idx]
                     self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
-                    self._song_guard_until = time.monotonic() + 2.0
+                    self._song_guard_file = track.get("file", "")
                     self._song = self.player.get_current_song()
 
     def _exec_double_tap(self):
