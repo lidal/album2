@@ -260,7 +260,7 @@ class MopidyPlayer:
             self._cmd("seekcur", str(fraction * dur_s))
 
     def play_track_in_queue(self, pos: int, track: dict | None = None):
-        """Play by position in the current queue (0-indexed) via HTTP RPC."""
+        """Play by position in the current queue (0-indexed)."""
         with self._ctrl_lock:
             self._status["state"] = "play"
             if track:
@@ -270,16 +270,7 @@ class MopidyPlayer:
                     "album":  track.get("album", ""),
                     "file":   track.get("file", ""),
                 }
-
-        def _do():
-            tl_tracks = self._rpc("core.tracklist.get_tl_tracks")
-            if tl_tracks and 0 <= pos < len(tl_tracks):
-                self._rpc("core.playback.play", tlid=tl_tracks[pos]["tlid"])
-            else:
-                log.warning("play_track_in_queue: pos=%d out of range (queue len=%s)",
-                            pos, len(tl_tracks) if tl_tracks else None)
-
-        threading.Thread(target=_do, daemon=True).start()
+        threading.Thread(target=self._cmd, args=("play", str(pos)), daemon=True).start()
 
     def set_song_optimistic(self, song: dict):
         """Immediately update the current-song cache without waiting for the poll loop."""
