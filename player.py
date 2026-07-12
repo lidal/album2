@@ -256,13 +256,8 @@ class MopidyPlayer:
         if dur_s <= 0:
             song  = self.get_current_song()
             dur_s = float(song.get("time", 0) or 0)
-        log.info("seek frac=%.3f dur_s=%.1f time_str=%r", fraction, dur_s, time_str)
         if dur_s > 0:
-            target_ms = int(fraction * dur_s * 1000)
-            result = self._rpc("core.playback.seek", time_position=target_ms)
-            log.info("seek target=%dms result=%r", target_ms, result)
-        else:
-            log.warning("seek: dur_s=0, cannot seek")
+            self._cmd("seekcur", str(fraction * dur_s))
 
     def play_track_in_queue(self, pos: int, track: dict | None = None):
         """Play by position in the current queue (0-indexed) via HTTP RPC."""
