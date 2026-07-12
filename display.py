@@ -1194,6 +1194,13 @@ class App:
                                            (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if _settled:
                         self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                    else:
+                        # Cheap animation reflection: single flip of bottom rows,
+                        # no per-strip BLEND_MULT — refl_fade mask handles the fade.
+                        rh = min(max_h, _CAR_REFL_H + refl_y_off)
+                        anim_refl = pygame.transform.flip(
+                            surf.subsurface((0, max_h - rh, w, rh)), False, True)
+                        self.screen.blit(anim_refl, (blit_x, floor_y - refl_y_off))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
