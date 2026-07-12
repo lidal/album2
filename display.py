@@ -2244,6 +2244,7 @@ class App:
         self.screen.set_clip(0, clip_y, W, H - clip_y)   # clip top only, open bottom
 
         y = clip_y - scroll   # content origin, offset by scroll
+        deferred_dropdown = None   # drawn after all rows so it's on top
         for key, label in _SETTINGS_ITEMS:
             if key is None:
                 # section header
@@ -2264,26 +2265,12 @@ class App:
                 self.screen.blit(pt, (px + (pw - pt.get_width()) // 2,
                                       py2 + (ph - pt.get_height()) // 2))
                 if open_:
-                    opts     = _SETTINGS_SELECTORS[key]
-                    cur_low  = str(settings.get(key)).lower()
-                    dp_w     = max(pw + 40, 160)
-                    dp_x     = W - BTN_MARGIN - dp_w
-                    dp_y     = y + TRACK_ROW_H
-                    dp_h     = len(opts) * TRACK_ROW_H
-                    pygame.draw.rect(self.screen, COL_CELL_BG,
-                                     (dp_x, dp_y, dp_w, dp_h), border_radius=6)
-                    pygame.draw.rect(self.screen, COL_SEP,
-                                     (dp_x, dp_y, dp_w, dp_h), 1, border_radius=6)
-                    for oi, opt in enumerate(opts):
-                        oy  = dp_y + oi * TRACK_ROW_H
-                        sel = opt.lower() == cur_low
-                        oc  = COL_HIGHLIGHT if sel else COL_TRACK_NORMAL
-                        ot  = _render_text(self._f_track, opt, oc)
-                        self.screen.blit(ot, (dp_x + 16,
-                                              oy + (TRACK_ROW_H - ot.get_height()) // 2))
-                        if oi:
-                            pygame.draw.line(self.screen, COL_SEP,
-                                             (dp_x, oy), (dp_x + dp_w, oy))
+                    opts    = _SETTINGS_SELECTORS[key]
+                    cur_low = str(settings.get(key)).lower()
+                    dp_w    = max(pw + 40, 160)
+                    dp_x    = W - BTN_MARGIN - dp_w
+                    dp_y    = y + TRACK_ROW_H
+                    deferred_dropdown = (dp_x, dp_y, dp_w, opts, cur_low)
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
@@ -2422,6 +2409,22 @@ class App:
         sd_s = _render_text(self._f_track, "Shut down", (220, 80, 80))
         self.screen.blit(sd_s, (BTN_MARGIN, y + (TRACK_ROW_H - sd_s.get_height()) // 2))
         pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+
+        if deferred_dropdown:
+            dp_x, dp_y, dp_w, opts, cur_low = deferred_dropdown
+            dp_h = len(opts) * TRACK_ROW_H
+            pygame.draw.rect(self.screen, COL_CELL_BG,
+                             (dp_x, dp_y, dp_w, dp_h), border_radius=6)
+            pygame.draw.rect(self.screen, COL_SEP,
+                             (dp_x, dp_y, dp_w, dp_h), 1, border_radius=6)
+            for oi, opt in enumerate(opts):
+                oy  = dp_y + oi * TRACK_ROW_H
+                sel = opt.lower() == cur_low
+                oc  = COL_HIGHLIGHT if sel else COL_TRACK_NORMAL
+                ot  = _render_text(self._f_track, opt, oc)
+                self.screen.blit(ot, (dp_x + 16, oy + (TRACK_ROW_H - ot.get_height()) // 2))
+                if oi:
+                    pygame.draw.line(self.screen, COL_SEP, (dp_x, oy), (dp_x + dp_w, oy))
 
         self.screen.set_clip(old_clip)
         self._draw_progress()
@@ -3282,6 +3285,8 @@ class App:
         self._elapsed_base_t = time.monotonic()
 
     def _in_scrub_zone(self, pos) -> bool:
+        if self._song.get("file", "").startswith("spotify:"):
+            return False
         bar_y = self._progress_bar_y()
         return bar_y - SCRUB_LEEWAY // 2 <= pos[1] <= bar_y + PROGRESS_H + SCRUB_LEEWAY // 4
 
