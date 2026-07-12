@@ -17,7 +17,7 @@ _DEFAULTS: dict = {
     "cal_sx": 1.0, "cal_ox": 0.0,
     "cal_sy": 1.0, "cal_oy": 0.0,
     "car_reflections":  True,
-    "spotify_library":  False,
+    "library":          "local",
 }
 
 _data: dict = {}
@@ -51,4 +51,16 @@ def toggle(key):
 
 def set(key, value):
     _data[key] = value
+    save()
+
+
+def cycle(key: str, options: tuple | list):
+    """Advance *key* to the next value in *options* (case-insensitive match)."""
+    opts_lower = [str(o).lower() for o in options]
+    cur = str(_data.get(key, _DEFAULTS.get(key, options[0]))).lower()
+    try:
+        idx = opts_lower.index(cur)
+    except ValueError:
+        idx = -1
+    _data[key] = str(options[(idx + 1) % len(options)]).lower()
     save()

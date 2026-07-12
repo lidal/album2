@@ -229,7 +229,7 @@ _SETTINGS_ITEMS = [
     ("autoplay",    "Autoplay when opening album"),
     ("lyrics",      "Show lyrics"),
     (None,          "LIBRARY"),
-    ("spotify_library", "Use Spotify library"),
+    ("library",     "Library"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
     ("carousel",    "Carousel view"),
@@ -240,6 +240,12 @@ _SETTINGS_ITEMS = [
     ("car_reflections", "Show reflections"),
     ("car_cache",   "Cache pre-rendered album surfaces"),
 ]
+
+# Keys whose values are string options rather than booleans.
+# Tapping cycles to the next option; draw code renders a pill instead of a toggle.
+_SETTINGS_SELECTORS: dict[str, tuple[str, ...]] = {
+    "library": ("Local", "Spotify"),
+}
 
 # Keyboard rows: list of (label, weight).  Special labels: SHIFT BACK OK SPACE SYM ABC
 # Numbers row is always the first row on every page.
@@ -530,7 +536,7 @@ class App:
     # ── album list + thumbnails ───────────────────────────────────────────────
 
     def _load_albums(self):
-        library = "spotify" if settings.get("spotify_library") else "local"
+        library = settings.get("library") or "local"
         self._albums          = self.player.get_albums(library=library)
         self._thumbs_pending  = len(self._albums)
         self._dirty           = True
@@ -2208,6 +2214,19 @@ class App:
                 # section header
                 sh = _render_text(self._f_track_sm, label, COL_TEXT_ALBUM)
                 self.screen.blit(sh, (BTN_MARGIN, y + (TRACK_ROW_H - sh.get_height()) // 2))
+            elif key in _SETTINGS_SELECTORS:
+                sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
+                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                cur = str(settings.get(key)).capitalize()
+                pt  = _render_text(self._f_track_sm, cur, COL_BG)
+                pw  = pt.get_width() + 24
+                ph  = TOGGLE_H
+                px  = W - BTN_MARGIN - pw
+                py2 = y + (TRACK_ROW_H - ph) // 2
+                pygame.draw.rect(self.screen, COL_HIGHLIGHT, (px, py2, pw, ph),
+                                 border_radius=ph // 2)
+                self.screen.blit(pt, (px + (pw - pt.get_width()) // 2,
+                                      py2 + (ph - pt.get_height()) // 2))
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
@@ -2956,11 +2975,14 @@ class App:
                 return
             key = self._settings_item_at(pos)
             if key:
-                settings.toggle(key)
-                if key == "carousel":
-                    self._settings_return = self._browse_view()
-                elif key == "spotify_library":
-                    self._reload_library()
+                if key in _SETTINGS_SELECTORS:
+                    settings.cycle(key, _SETTINGS_SELECTORS[key])
+                    if key == "library":
+                        self._reload_library()
+                else:
+                    settings.toggle(key)
+                    if key == "carousel":
+                        self._settings_return = self._browse_view()
                 return
             if self._settings_bt_power_toggle_at(pos):
                 new_val = not self._bt_powered
