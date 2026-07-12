@@ -1177,10 +1177,11 @@ class App:
                         strip   = pygame.transform.smoothscale(
                                       thumb.subsurface((src_x, 0, src_w, th)),
                                       (dst_w, col_h))
-                        shadow_a = int(shadow_max * t_persp)
-                        if shadow_a > 0:
-                            df = max(0, 255 - shadow_a)
-                            strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
+                        if _settled:
+                            shadow_a = int(shadow_max * t_persp)
+                            if shadow_a > 0:
+                                df = max(0, 255 - shadow_a)
+                                strip.fill((df, df, df), special_flags=pygame.BLEND_MULT)
                         surf.blit(strip, (dst_x, dst_y))
                         if _settled:
                             col_bottom_y = album_blit_y + dst_y + col_h
