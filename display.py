@@ -107,6 +107,7 @@ _CAR_PERSP_N      = 32     # vertical strips for trapezoidal perspective simulat
 _CAR_SIDE_SCALE   = 0.84   # overall height scale for side albums (tall edge < center SIZE)
 # x-centre offsets from W//2 at integer distances 0, 1, 2.
 _CAR_AX           = (0, 270, 355)
+_CAR_PEEK_SHIFT   = 70     # px carousel + labels shift up when peeking from album panel
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -1105,7 +1106,14 @@ class App:
             return x, w, near_h, far_h, compress
 
         # All albums share the same floor line (bottom of centre album).
-        floor_y = _CAR_CY + _CAR_SIZE // 2
+        # When the album panel is peeking up from below, shift the carousel
+        # upward so it stays visible above the peek strip.
+        peek_frac = 0.0
+        if self._peeking:
+            peek_frac = max(0.0, min(1.0,
+                (H - self._album_y) / TRACKLIST_ART_H))
+        y_shift = int(peek_frac * _CAR_PEEK_SHIFT)
+        floor_y = _CAR_CY + _CAR_SIZE // 2 - y_shift
 
         # Furthest albums first → nearer ones blit on top (correct depth order).
         visible = []
@@ -1266,8 +1274,10 @@ class App:
             self.screen.blit(surf, (x - surf.get_width() // 2, floor_y - max_h))
 
         # Name + artist centred below the album strip.
-        c   = self._albums[center_idx]
-        ty  = floor_y + _CAR_REFL_H + 18
+        # Compress the gap between reflections and text when peeking.
+        c        = self._albums[center_idx]
+        text_gap = int(18 - peek_frac * 10)   # 18px → 8px as panel slides up
+        ty       = floor_y + _CAR_REFL_H + text_gap
         ns  = _render_text(self._f_title,  c.get("name",   ""), COL_TEXT_TITLE,  W - 80)
         as_ = _render_text(self._f_artist, c.get("artist", ""), COL_TEXT_ARTIST, W - 80)
         self.screen.blit(ns,  ((W - ns.get_width())  // 2, ty))
