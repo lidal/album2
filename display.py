@@ -1194,12 +1194,11 @@ class App:
                         flipped = pygame.transform.flip(
                             strip.subsurface((0, col_h - rh_strip, dst_w, rh_strip)),
                             False, True)
-                        if _settled:
-                            flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                        flipped.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
                         refl_comp.blit(flipped,
                                        (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
-                        refl_comp.fill((80, 80, 80), special_flags=pygame.BLEND_MULT)
+                        refl_comp.set_colorkey(COL_BG)
                         anim_refls.append((refl_comp, (blit_x, floor_y - refl_y_off)))
                     else:
                         self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
