@@ -293,38 +293,40 @@ class MopidyPlayer:
         return self._get_albums_local()
 
     def _get_albums_local(self) -> list[dict]:
-        """Return local library albums via MPD, sorted by artist/year/album."""
-        def _q(c):
-            raw = c.list("album")
-            result = []
-            for item in raw:
-                name = item.get("album", "").strip()
-                if not name:
-                    continue
-                tracks = c.find("album", name)
-                if not tracks:
-                    continue
-                t0 = tracks[0]
-                artist = (
-                    t0.get("albumartist")
-                    or t0.get("artist")
-                    or ""
-                ).strip()
-                date = t0.get("date", "") or ""
+        """Return local library albums via Mopidy RPC browse, sorted by artist/year/album."""
+        refs = self._rpc("core.library.browse", uri="local:directory:") or []
+        album_uris = [r["uri"] for r in refs if r.get("type") == "album" and r.get("uri")]
+        if not album_uris:
+            log.warning("Local: no albums found in local:directory:")
+            return []
+        lookup = self._rpc("core.library.lookup", uris=album_uris) or {}
+        result = []
+        for ref in refs:
+            uri  = ref.get("uri", "")
+            name = ref.get("name", "").strip()
+            if not uri or not name:
+                continue
+            tracks = lookup.get(uri, [])
+            artist, year = "", 9999
+            if tracks:
+                t        = tracks[0]
+                alb_obj  = t.get("album") if isinstance(t.get("album"), dict) else {}
+                artists  = alb_obj.get("artists", []) or t.get("artists", [])
+                artist   = artists[0].get("name", "") if artists else ""
+                date     = t.get("date") or alb_obj.get("date", "")
                 try:
                     year = int(str(date).split("-")[0])
                 except (ValueError, IndexError):
                     year = 9999
-                result.append({
-                    "name":      name,
-                    "artist":    artist,
-                    "year":      year,
-                    "track_uri": t0.get("file", ""),
-                    "tracks":    None,
-                    "thumb":     None,
-                })
-            return sorted(result, key=lambda x: (x["artist"].casefold(), x["year"], x["name"].casefold()))
-        return self._browse(_q) or []
+            result.append({
+                "name":      name,
+                "artist":    artist,
+                "year":      year,
+                "track_uri": uri,   # local:album:md5:xxx — works with core.library.get_images
+                "tracks":    None,
+                "thumb":     None,
+            })
+        return sorted(result, key=lambda x: (x["artist"].casefold(), x["year"], x["name"].casefold()))
 
     def _get_albums_spotify(self) -> list[dict]:
         """Return user's saved Spotify albums via Mopidy RPC, sorted by artist/album."""
@@ -356,8 +358,11 @@ class MopidyPlayer:
 
     def get_album_tracks(self, album: dict) -> list[dict]:
         """Return track dicts for every track in *album*, sorted by disc/track."""
-        if album.get("track_uri", "").startswith("spotify:album:"):
-            return self._get_album_tracks_spotify(album["track_uri"])
+        uri = album.get("track_uri", "")
+        if uri.startswith("spotify:album:"):
+            return self._get_album_tracks_spotify(uri)
+        if uri.startswith("local:album:"):
+            return self._get_album_tracks_local_rpc(uri)
         return self._get_album_tracks_local(album)
 
     def _get_album_tracks_local(self, album: dict) -> list[dict]:
@@ -381,6 +386,25 @@ class MopidyPlayer:
             ))
 
         return self._browse(_q) or []
+
+    def _get_album_tracks_local_rpc(self, album_uri: str) -> list[dict]:
+        """Return track dicts for a local:album: URI via RPC lookup, sorted by disc/track."""
+        lookup = self._rpc("core.library.lookup", uris=[album_uri]) or {}
+        track_list = lookup.get(album_uri, [])
+        result = []
+        for t in track_list:
+            uri     = t.get("uri", "")
+            artists = t.get("artists", [])
+            alb_obj = t.get("album") if isinstance(t.get("album"), dict) else {}
+            result.append({
+                "file":   uri,
+                "title":  t.get("name", ""),
+                "artist": artists[0].get("name", "") if artists else "",
+                "album":  alb_obj.get("name", "") if isinstance(alb_obj, dict) else "",
+                "track":  t.get("track_no") or 0,
+                "disc":   t.get("disc_no")  or 1,
+            })
+        return sorted(result, key=lambda t: (int(t["disc"]), int(t["track"])))
 
     def _get_album_tracks_spotify(self, album_uri: str) -> list[dict]:
         """Return track dicts for a Spotify album URI, sorted by disc/track."""
