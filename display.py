@@ -484,6 +484,8 @@ class App:
         self._loading_album    = False
         # monotonic deadline before which backwards elapsed jumps are ignored (post-seek buffer)
         self._seek_guard_until = 0.0
+        # monotonic deadline before which poll may not overwrite _song (post-track-switch)
+        self._song_guard_until = 0.0
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -883,9 +885,10 @@ class App:
                 if el >= self._elapsed_base - 1.0 or now > self._seek_guard_until:
                     self._elapsed_base   = el
                     self._elapsed_base_t = now
-            # Only overwrite _song if MPD returned something — don't clobber
-            # our optimistic data while the track is still being queued.
-            if song:
+            # Only overwrite _song if MPD returned something and the guard has
+            # expired — prevents MPD's stale currentsong from reverting an
+            # optimistic track switch for the ~1s until MPD catches up.
+            if song and now > self._song_guard_until:
                 self._song = song
             new_uri = self._song.get("file", "")
             # re-fetch art if track changed while album view is open
@@ -3306,6 +3309,7 @@ class App:
                     track = self._tracks[idx]
                     self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
+                    self._song_guard_until = time.monotonic() + 2.0
                     self._song = self.player.get_current_song()
 
     def _exec_double_tap(self):
