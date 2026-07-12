@@ -1115,6 +1115,7 @@ class App:
         N = _CAR_PERSP_N if _settled else max(4, _CAR_PERSP_N // 4)
 
         surfs = []
+        anim_above = []  # above-floor triangle segments, blitted after pass 2
         for _, d, i, x, w, near_h, far_h, compress, alpha in visible:
             self._queue_thumb(i)
             thumb  = self._albums[i].get("thumb")
@@ -1198,7 +1199,15 @@ class App:
                                        (dst_x, col_bottom_y - floor_y + refl_y_off))
                     if not _settled:
                         refl_comp.set_colorkey(COL_BG)
-                    self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
+                        # Below-floor in pass 1 (hidden behind album bodies is fine here)
+                        self.screen.blit(refl_comp, (blit_x, floor_y),
+                                         area=(0, refl_y_off, w, _CAR_REFL_H))
+                        # Above-floor triangle saved for after pass 2 (nearest albums only)
+                        if refl_y_off > 0 and abs(d) < 1.0:
+                            anim_above.append((refl_comp, (blit_x, floor_y - refl_y_off),
+                                               (0, 0, w, refl_y_off)))
+                    else:
+                        self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
 
                 if use_cache:
                     # Pre-blend SRCALPHA transparency into COL_BG and switch to
@@ -1230,6 +1239,10 @@ class App:
                 surf = surf.copy()
                 surf.set_alpha(alpha)
             self.screen.blit(surf, (x - surf.get_width() // 2, floor_y - max_h))
+
+        # Above-floor animation reflection triangles (nearest side albums only).
+        for refl, pos, area in anim_above:
+            self.screen.blit(refl, pos, area=area)
 
         # Name + artist centred below the album strip.
         c   = self._albums[center_idx]
