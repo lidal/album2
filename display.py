@@ -1080,7 +1080,7 @@ class App:
         for i in range(n):
             d = i - pos
             a = abs(d)
-            if a < 2.4:
+            if a < 1.9:
                 x, w, near_h, far_h, compress = _slot(d)
                 # Fade only the very outermost albums (a > 1.4) so core albums
                 # are fully opaque; the fade gracefully clips the far-edge album.
