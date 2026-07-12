@@ -669,6 +669,9 @@ class App:
         self._album_y      = _lerp(self._album_y,      self._album_y_t,      k_pan)
         self._ctrl_a       = _lerp(self._ctrl_a,       self._ctrl_a_t,       k_ctl)
         self._carousel_pos = _lerp(self._carousel_pos, self._carousel_pos_t, k_pan)
+        if (self._carousel_pos_t % 1.0 == 0.0
+                and abs(self._carousel_pos - self._carousel_pos_t) < 0.005):
+            self._carousel_pos = self._carousel_pos_t
 
         k_bg = min(1.0, 3.0 * dt)
         self._tl_bg_cur = [_lerp(self._tl_bg_cur[i], self._tl_bg_t[i], k_bg) for i in range(3)]
@@ -1105,7 +1108,9 @@ class App:
         # Cache key includes (d > 0) because left/right albums need opposite
         # t_persp direction for correct perspective; omitting the sign causes
         # albums to show the wrong face after scrolling past centre.
-        use_cache = settings.get("car_cache")
+        _settled  = (self._carousel_pos_t % 1.0 == 0.0
+                     and self._carousel_pos == self._carousel_pos_t)
+        use_cache = settings.get("car_cache") and _settled
         N         = _CAR_PERSP_N
 
         surfs = []
@@ -1176,6 +1181,9 @@ class App:
                 self.screen.blit(refl_comp, (blit_x, floor_y - refl_y_off))
                 if use_cache:
                     self._car_surf_cache[cache_key] = (surf, refl_comp)
+                    if len(self._car_surf_cache) > 50:
+                        for k in list(self._car_surf_cache.keys())[:25]:
+                            del self._car_surf_cache[k]
             else:
                 surf = pygame.Surface((w, near_h))
                 surf.fill(COL_CELL_BG)
