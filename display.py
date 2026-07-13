@@ -2630,6 +2630,9 @@ class App:
                     bar_w = int((W - BTN_MARGIN * 2) * done / max(1, total))
                     pygame.draw.rect(self.screen, COL_HIGHLIGHT,
                                      (BTN_MARGIN, y + TRACK_ROW_H - 3, bar_w, 3))
+                    stop_s = _render_text(self._f_track_sm, "Stop", COL_HIGHLIGHT)
+                    self.screen.blit(stop_s, (W - BTN_MARGIN - stop_s.get_width(),
+                                              y + (TRACK_ROW_H - stop_s.get_height()) // 2))
                 elif not self._lyrics_bulk_done:
                     warn = _render_text(self._f_track_sm, "may be slow", COL_TEXT_ALBUM)
                     self.screen.blit(warn, (W - BTN_MARGIN - warn.get_width(),
@@ -3462,7 +3465,9 @@ class App:
                     self._settings_dropdown = key if self._settings_dropdown != key else None
                     self._dirty = True
                 elif key == "lyrics_cache_all":
-                    if self._lyrics_bulk_progress is None:
+                    if self._lyrics_bulk_progress is not None:
+                        self._lyrics_bulk_progress = None  # signals thread to stop
+                    else:
                         self._lyrics_bulk_done = False
                         self._start_lyrics_bulk_cache()
                     self._dirty = True
