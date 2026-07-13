@@ -236,6 +236,7 @@ _SETTINGS_ITEMS = [
     ("album_sort",  "Sort by"),
     (None,          "SPOTIFY"),
     ("spotify_bitrate", "Bitrate"),
+    ("lyrics_cache_all", "Cache all lyrics"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
     ("carousel",    "Carousel view"),
@@ -409,6 +410,8 @@ class App:
         self._lyrics_drag:     bool  = False
         self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
         self._prefetch_gen:    int   = 0    # incremented on each new album; cancels old prefetch
+        self._lyrics_bulk_progress: tuple | None = None  # (done, total) while running
+        self._lyrics_bulk_done:     bool = False
         self._lyrics_anim_vis:   float = 0.0  # animated scroll position (visual rows)
         self._lyrics_target_vis: float = 0.0  # target scroll position
         self._lyrics_prev_idx:   int   = -1   # last known logical line index
@@ -1984,6 +1987,60 @@ class App:
                     self._dirty = True
         threading.Thread(target=_run, daemon=True).start()
 
+    def _start_lyrics_bulk_cache(self):
+        """Fetch and cache lyrics for every track in the entire library."""
+        self._lyrics_bulk_progress = (0, 0)
+        self._lyrics_bulk_done     = False
+        self._dirty = True
+
+        def _run():
+            albums = list(self._albums)
+            done   = 0
+            total  = 0
+            for album in albums:
+                # Use already-loaded tracks; fall back to fetching from player.
+                tracks = album.get("tracks") or []
+                if not tracks:
+                    try:
+                        tracks = self.player.get_album_tracks(album)
+                        album["tracks"] = tracks
+                    except Exception:
+                        log.exception("bulk lyrics: failed loading %s", album.get("name"))
+                        tracks = []
+
+                total += len(tracks)
+                self._lyrics_bulk_progress = (done, total)
+                self._dirty = True
+
+                for track in tracks:
+                    if self._lyrics_bulk_progress is None:
+                        return   # cancelled
+                    uri = track.get("file", "")
+                    if uri and uri not in self._lyrics_cache:
+                        snap = {
+                            "title":  track.get("title", ""),
+                            "artist": track.get("artist", ""),
+                            "album":  track.get("album", ""),
+                            "file":   uri,
+                        }
+                        try:
+                            text   = self._load_lyrics_for_uri(uri, song=snap, status={})
+                            parsed = self._parse_lyrics(text) if text else None
+                        except Exception:
+                            log.exception("bulk lyrics: failed for %s", uri)
+                            parsed = None
+                        self._lyrics_cache[uri] = parsed
+                    done += 1
+                    self._lyrics_bulk_progress = (done, total)
+                    self._dirty = True
+
+            self._lyrics_bulk_progress = None
+            self._lyrics_bulk_done     = True
+            self._dirty = True
+            log.info("bulk lyrics: done — %d tracks processed", done)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _resolve_music_path(self, uri: str) -> str | None:
         """Convert an MPD/Mopidy file URI to an absolute filesystem path."""
         from urllib.parse import unquote
@@ -2562,6 +2619,29 @@ class App:
                     dp_x    = W - BTN_MARGIN - dp_w
                     dp_y    = y + TRACK_ROW_H
                     deferred_dropdown = (dp_x, dp_y, dp_w, opts, cur_low)
+            elif key == "lyrics_cache_all":
+                bulk = self._lyrics_bulk_progress
+                if bulk is not None:
+                    done, total = bulk
+                    lbl = f"Caching lyrics… {done}/{total}"
+                    lbl_col = COL_TRACK_NUM
+                elif self._lyrics_bulk_done:
+                    lbl = "All lyrics cached"
+                    lbl_col = COL_TEXT_ALBUM
+                else:
+                    lbl = "Cache all lyrics"
+                    lbl_col = COL_HIGHLIGHT
+                sl = _render_text(self._f_track, lbl, lbl_col)
+                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                if bulk is not None:
+                    done, total = bulk
+                    bar_w = int((W - BTN_MARGIN * 2) * done / max(1, total))
+                    pygame.draw.rect(self.screen, COL_HIGHLIGHT,
+                                     (BTN_MARGIN, y + TRACK_ROW_H - 3, bar_w, 3))
+                elif not self._lyrics_bulk_done:
+                    warn = _render_text(self._f_track_sm, "may be slow", COL_TEXT_ALBUM)
+                    self.screen.blit(warn, (W - BTN_MARGIN - warn.get_width(),
+                                            y + (TRACK_ROW_H - warn.get_height()) // 2))
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
@@ -3388,6 +3468,11 @@ class App:
             if key:
                 if key in _SETTINGS_SELECTORS:
                     self._settings_dropdown = key if self._settings_dropdown != key else None
+                    self._dirty = True
+                elif key == "lyrics_cache_all":
+                    if self._lyrics_bulk_progress is None:
+                        self._lyrics_bulk_done = False
+                        self._start_lyrics_bulk_cache()
                     self._dirty = True
                 else:
                     settings.toggle(key)
