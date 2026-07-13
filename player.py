@@ -409,10 +409,9 @@ class MopidyPlayer:
         lookup = self._rpc("core.library.lookup", uris=[album_uri]) or {}
         track_list = lookup.get(album_uri, [])
         if not track_list:
-            # Some albums (unusual releases, hidden albums) can't be looked up
-            # by album URI directly — browse to get individual track URIs, then
-            # look those up one batch at a time.
+            log.warning("Spotify lookup empty for %s; raw result: %r", album_uri, lookup)
             refs = self._rpc("core.library.browse", uri=album_uri) or []
+            log.warning("Spotify browse %s → %d refs: %r", album_uri, len(refs), refs)
             track_uris = [r["uri"] for r in refs
                           if r.get("type") == "track" and r.get("uri")]
             if track_uris:
