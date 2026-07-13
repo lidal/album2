@@ -979,8 +979,12 @@ class App:
                 self._lyrics_parsed  = None
                 self._lyrics_scroll  = 0.0
                 self._lyrics_loading = True
-                def _fetch_lyr(u=new_uri):
-                    text = self._load_lyrics_for_uri(u)
+                # Snapshot song + status NOW so the thread doesn't race with
+                # poll updates that could change self._song mid-fetch.
+                _snap_song   = dict(self._song)
+                _snap_status = dict(self._status)
+                def _fetch_lyr(u=new_uri, ss=_snap_song, st=_snap_status):
+                    text = self._load_lyrics_for_uri(u, song=ss, status=st)
                     self._lyrics         = text
                     self._lyrics_parsed  = self._parse_lyrics(text) if text else None
                     self._lyrics_loading = False
@@ -1938,7 +1942,13 @@ class App:
         base = MUSIC_DIR or os.path.expanduser("~/Music")
         return os.path.join(base, rel)
 
-    def _load_lyrics_for_uri(self, uri: str) -> str | None:
+    def _load_lyrics_for_uri(self, uri: str,
+                             song: dict | None = None,
+                             status: dict | None = None) -> str | None:
+        if song is None:
+            song = self._song
+        if status is None:
+            status = self._status
         path = self._resolve_music_path(uri)
         log.info("lyrics: loading for uri=%s path=%s", uri, path)
 
@@ -1972,7 +1982,6 @@ class App:
                 log.warning("lyrics: sidecar load error: %s", e)
 
         # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
-        song   = self._song
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
         title  = (song.get("title") or "").strip()
         album  = (song.get("album") or "").strip()
@@ -1980,7 +1989,8 @@ class App:
         if artist and title:
             try:
                 import urllib.parse
-                time_str = self._status.get("time", "")
+                req = __import__("requests")
+                time_str = status.get("time", "")
                 tparts   = time_str.split(":")
                 duration = int(float(tparts[1])) if len(tparts) >= 2 else 0
                 params: dict = {"artist_name": artist, "track_name": title}
@@ -1989,25 +1999,50 @@ class App:
                 if duration:
                     params["duration"] = duration
                 url = "https://lrclib.net/api/get?" + urllib.parse.urlencode(params)
-                log.info("lyrics: trying lrclib.net — %s", url)
-                r = __import__("requests").get(url, timeout=10)
-                log.info("lyrics: lrclib.net status %s", r.status_code)
+                log.info("lyrics: trying lrclib.net get — %s", url)
+                r = req.get(url, timeout=10)
+                log.info("lyrics: lrclib.net get status %s", r.status_code)
+                lrclib_data = None
                 if r.status_code == 200:
-                    data = r.json()
-                    if data.get("instrumental"):
+                    lrclib_data = r.json()
+                elif r.status_code == 404:
+                    # Exact match not found — try fuzzy search
+                    s_url = ("https://lrclib.net/api/search?"
+                             + urllib.parse.urlencode({"artist_name": artist,
+                                                       "track_name":  title}))
+                    log.info("lyrics: lrclib.net get 404, trying search — %s", s_url)
+                    sr = req.get(s_url, timeout=10)
+                    log.info("lyrics: lrclib.net search status %s", sr.status_code)
+                    if sr.status_code == 200:
+                        results = sr.json()
+                        log.info("lyrics: lrclib.net search returned %d results", len(results))
+                        # prefer a result with synced lyrics; fall back to first with plain
+                        for res in results:
+                            if (res.get("syncedLyrics") or "").strip():
+                                lrclib_data = res
+                                log.info("lyrics: using lrclib.net search result id=%s", res.get("id"))
+                                break
+                        if lrclib_data is None:
+                            for res in results:
+                                if (res.get("plainLyrics") or "").strip():
+                                    lrclib_data = res
+                                    log.info("lyrics: using lrclib.net search result (plain) id=%s", res.get("id"))
+                                    break
+                if lrclib_data is not None:
+                    if lrclib_data.get("instrumental"):
                         log.info("lyrics: lrclib.net says instrumental, skipping")
                     else:
-                        synced = (data.get("syncedLyrics") or "").strip()
+                        synced = (lrclib_data.get("syncedLyrics") or "").strip()
                         if synced:
                             log.info("lyrics: lrclib.net returned synced LRC (%d chars)", len(synced))
                             return synced
-                        plain = (data.get("plainLyrics") or "").strip()
+                        plain = (lrclib_data.get("plainLyrics") or "").strip()
                         if plain:
                             log.info("lyrics: lrclib.net returned plain text (%d chars)", len(plain))
                             return plain
-                        log.info("lyrics: lrclib.net 200 but both syncedLyrics and plainLyrics empty")
+                        log.info("lyrics: lrclib.net both syncedLyrics and plainLyrics empty")
                 else:
-                    log.info("lyrics: lrclib.net returned %s", r.status_code)
+                    log.info("lyrics: lrclib.net no result found")
             except Exception as e:
                 log.warning("lyrics: lrclib.net fetch failed: %s", e)
         else:
