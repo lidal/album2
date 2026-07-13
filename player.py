@@ -397,7 +397,12 @@ class MopidyPlayer:
                 "track":  t.get("track_no") or 0,
                 "disc":   t.get("disc_no")  or 1,
             })
-        return sorted(result, key=lambda t: (int(t["disc"]), int(t["track"])))
+        def _sort_key(t):
+            try:
+                return (int(t["disc"]), int(t["track"]))
+            except (ValueError, TypeError):
+                return (1, 0)
+        return sorted(result, key=_sort_key)
 
     def _get_album_tracks_spotify(self, album_uri: str) -> list[dict]:
         """Return track dicts for a Spotify album URI, sorted by disc/track."""
@@ -415,7 +420,12 @@ class MopidyPlayer:
                 "track":  t.get("track_no") or 0,
                 "disc":   t.get("disc_no")  or 1,
             })
-        return sorted(result, key=lambda t: (int(t["disc"]), int(t["track"])))
+        def _sort_key(t):
+            try:
+                return (int(t["disc"]), int(t["track"]))
+            except (ValueError, TypeError):
+                return (1, 0)
+        return sorted(result, key=_sort_key)
 
     def play_album_fast(self, album_uri: str) -> list[dict]:
         """Add *album_uri* to tracklist and start playing immediately.
@@ -442,7 +452,12 @@ class MopidyPlayer:
             self._rpc("core.playback.play", tlid=tl_tracks[0]["tlid"])
             with self._ctrl_lock:
                 self._status["state"] = "play"
-        return sorted(tracks, key=lambda t: (int(t["disc"]), int(t["track"])))
+        def _sort_key(t):
+            try:
+                return (int(t["disc"]), int(t["track"]))
+            except (ValueError, TypeError):
+                return (1, 0)
+        return sorted(tracks, key=_sort_key)
 
     def load_album(self, tracks: list[dict], track_index: int = 0):
         """Replace queue with *tracks*, seek to *track_index*, and pause."""

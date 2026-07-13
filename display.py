@@ -489,8 +489,13 @@ class App:
         # URI we expect after a track tap. Guard stays active (blocking wrong-file
         # updates) until MPD confirms the URI AND bitrate > 0 (audio flowing),
         # or until the 5s hard timeout fires.
-        self._song_guard_file: str     = ""
+        self._song_guard_file: str      = ""
         self._song_guard_timeout: float = 0.0
+        # Previous file blocked for a brief window after the guard clears, so
+        # a Spotify backend glitch that briefly re-reports the old URI can't
+        # flip the display back after we've already confirmed the new track.
+        self._song_prev_file: str      = ""
+        self._song_block_until: float  = 0.0
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -933,7 +938,11 @@ class App:
                     if f == self._song_guard_file:
                         self._song = song
                         if bitrate > 0 or timed_out:
-                            self._song_guard_file = ""
+                            # Confirmed: arm a short post-guard block so a
+                            # transient backend revert to the old URI can't
+                            # flip the display back.
+                            self._song_block_until = now + 3.0
+                            self._song_guard_file  = ""
                     elif timed_out:
                         # Timed out but MPD still reports the old file — clear
                         # the guard without reverting _song (keep showing the
@@ -941,6 +950,11 @@ class App:
                         # Spotify actually starts it).
                         self._song_guard_file = ""
                     # else: wrong file, still within timeout → skip
+                elif self._song_prev_file and now < self._song_block_until:
+                    # Post-guard window: accept any file that isn't the old one.
+                    if f != self._song_prev_file:
+                        self._song           = song
+                        self._song_prev_file = ""
                 else:
                     self._song = song
             new_uri = self._song.get("file", "")
@@ -1687,38 +1701,44 @@ class App:
 
         # load tracks + pause at track 0 in background
         def _load():
-            album_uri  = album.get("track_uri", "")
-            is_spotify = album_uri.startswith("spotify:album:")
-            autoplay   = settings.get("autoplay")
+            try:
+                album_uri  = album.get("track_uri", "")
+                is_spotify = album_uri.startswith("spotify:album:")
+                autoplay   = settings.get("autoplay")
 
-            if is_spotify and autoplay:
-                # Fast path: single RPC add → play, no pre-lookup needed.
-                # core.tracklist.add returns tl_tracks with full metadata so we
-                # parse tracks for the UI from that same response.
-                tracks = self.player.play_album_fast(album_uri)
-            else:
-                tracks = self.player.get_album_tracks(album)
+                if is_spotify and autoplay:
+                    # Fast path: single RPC add → play, no pre-lookup needed.
+                    # core.tracklist.add returns tl_tracks with full metadata so we
+                    # parse tracks for the UI from that same response.
+                    tracks = self.player.play_album_fast(album_uri)
+                else:
+                    tracks = self.player.get_album_tracks(album)
 
-            album["tracks"] = tracks
-            self._tracks = tracks
-            if tracks:
-                t0 = tracks[0]
-                self.player.set_song_optimistic({
-                    "title":  t0.get("title", ""),
-                    "artist": t0.get("artist") or t0.get("albumartist", album["artist"]),
-                    "album":  t0.get("album", album["name"]),
-                    "file":   t0.get("file", ""),
-                })
-                if not is_spotify:
-                    if autoplay:
-                        self.player.play_album(tracks, 0)
-                    else:
+                album["tracks"] = tracks
+                self._tracks = tracks
+                if tracks:
+                    t0 = tracks[0]
+                    self.player.set_song_optimistic({
+                        "title":  t0.get("title", ""),
+                        "artist": t0.get("artist") or t0.get("albumartist", album["artist"]),
+                        "album":  t0.get("album", album["name"]),
+                        "file":   t0.get("file", ""),
+                    })
+                    if not is_spotify:
+                        if autoplay:
+                            self.player.play_album(tracks, 0)
+                        else:
+                            self.player.load_album(tracks, 0)
+                    elif not autoplay:
                         self.player.load_album(tracks, 0)
-                elif not autoplay:
-                    self.player.load_album(tracks, 0)
-            self._loading_album  = False
-            self._elapsed_base   = 0.0
-            self._elapsed_base_t = time.monotonic()
+                elif album_uri:
+                    log.warning("No tracks returned for album %r (uri=%s)", album.get("name"), album_uri)
+            except Exception:
+                log.exception("_load() failed for album %r", album.get("name"))
+            finally:
+                self._loading_album  = False
+                self._elapsed_base   = 0.0
+                self._elapsed_base_t = time.monotonic()
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -3364,6 +3384,8 @@ class App:
                     track = self._tracks[idx]
                     self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
+                    self._song_prev_file     = self._song.get("file", "")
+                    self._song_block_until   = 0.0
                     self._song_guard_file    = track.get("file", "")
                     self._song_guard_timeout = time.monotonic() + 5.0
                     # Set directly — player._song may be overwritten by the poll
