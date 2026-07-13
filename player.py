@@ -197,6 +197,11 @@ class MopidyPlayer:
         # rebuilding the queue.  The auto-advance in _poll_loop must not fire
         # during this window — the tracklist.clear causes a spurious stop-state.
         self._queue_rebuild_until: float = 0.0
+        # Full sorted track list for the currently loaded album, used by the
+        # recovery path when Mopidy-Spotify clears the queue (qlen=0) after a
+        # clicked track ends.
+        self._active_tracks: list[dict] = []
+        self._recovery_in_progress: bool = False
 
         t = threading.Thread(target=self._poll_loop, daemon=True)
         t.start()
@@ -204,8 +209,9 @@ class MopidyPlayer:
     # ── internal: status poll ─────────────────────────────────────────────────
 
     def _poll_loop(self):
-        _prev_had_next = False
-        _stop_since    = 0.0     # monotonic time when "stop" state first seen
+        _prev_had_next  = False
+        _stop_since     = 0.0     # monotonic time when "stop" state first seen
+        _stopped_song: dict = {}  # song that was playing when stop was detected
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -226,7 +232,8 @@ class MopidyPlayer:
                         _prev_had_next = False
                         _stop_since    = 0.0
                     elif _stop_since == 0.0:
-                        _stop_since = time.monotonic()
+                        _stop_since   = time.monotonic()
+                        _stopped_song = dict(song)
                         log.info("poll: state=stop  had_next=%s  nextsong_id=%s  qlen=%s",
                                  _prev_had_next,
                                  status.get("nextsongid", "—"),
@@ -234,17 +241,29 @@ class MopidyPlayer:
                     # Only auto-advance after 1 s — avoids firing during brief
                     # stop-states that occur when clicking a track to seek.
                     elif _prev_had_next and time.monotonic() - _stop_since > 1.0:
-                        log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
                         _prev_had_next = False
                         _stop_since    = 0.0
-                        with self._ctrl_lock:
-                            try:
-                                self._ctrl.next()
-                                self._ctrl.play()
-                                status = self._ctrl.status()
-                                song   = self._ctrl.currentsong()
-                            except Exception as e:
-                                log.warning("auto-advance failed: %s", e)
+                        qlen = int(status.get("playlistlength", "0") or "0")
+                        if qlen == 0 and self._active_tracks and not self._recovery_in_progress:
+                            # Mopidy-Spotify cleared the queue after a clicked track
+                            # ended (single-track context mode).  Reload from the
+                            # next track using individual URIs.
+                            log.warning("queue cleared after track end — recovering from next")
+                            self._recovery_in_progress = True
+                            _uri = _stopped_song.get("file", "")
+                            threading.Thread(
+                                target=self._recover_next, args=(_uri,), daemon=True
+                            ).start()
+                        elif qlen > 0:
+                            log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
+                            with self._ctrl_lock:
+                                try:
+                                    self._ctrl.next()
+                                    self._ctrl.play()
+                                    status = self._ctrl.status()
+                                    song   = self._ctrl.currentsong()
+                                except Exception as e:
+                                    log.warning("auto-advance failed: %s", e)
                 with self._ctrl_lock:
                     self._status = status
                     self._song   = song
@@ -651,7 +670,30 @@ class MopidyPlayer:
                 return (int(t["disc"]), int(t["track"]))
             except (ValueError, TypeError):
                 return (1, 0)
-        return sorted(tracks, key=_sort_key)
+        sorted_tracks = sorted(tracks, key=_sort_key)
+        self._active_tracks = sorted_tracks
+        return sorted_tracks
+
+    def _recover_next(self, from_uri: str):
+        """Reload the queue with individual track URIs and play from the track
+        after *from_uri*.  Called when Mopidy-Spotify clears the queue (qlen=0)
+        after a specific-track play (single-track context mode)."""
+        try:
+            tracks = self._active_tracks
+            idx = next((i for i, t in enumerate(tracks) if t.get("file") == from_uri), -1)
+            if idx < 0:
+                log.warning("recover_next: %r not found in active tracks", from_uri)
+                return
+            next_idx = idx + 1
+            if next_idx >= len(tracks):
+                log.info("recover_next: %r was last track", from_uri)
+                return
+            log.info("recover_next: reloading from track %d/%d", next_idx + 1, len(tracks))
+            self.play_album(tracks, next_idx, start_uri=tracks[next_idx].get("file", ""))
+        except Exception as e:
+            log.warning("recover_next failed: %s", e)
+        finally:
+            self._recovery_in_progress = False
 
     def load_album(self, tracks: list[dict], track_index: int = 0):
         """Replace queue with *tracks*, seek to *track_index*, and pause."""
@@ -697,6 +739,7 @@ class MopidyPlayer:
         if tlid is not None:
             self._rpc("core.playback.play", tlid=tlid)
         self._queue_rebuild_until = 0.0
+        self._active_tracks = list(tracks)
         with self._ctrl_lock:
             self._status["state"] = "play"
 

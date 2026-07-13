@@ -3673,20 +3673,7 @@ class App:
                 idx = self._track_at(pos)
                 if idx is not None and idx < len(self._tracks):
                     track = self._tracks[idx]
-                    # Re-populate the full Mopidy queue with individual track
-                    # URIs and play from the clicked position.  play_album_fast
-                    # loads via an album URI; core.playback.play(tlid=X) on that
-                    # queue puts Mopidy-Spotify into single-track context mode,
-                    # which clears the queue when the track ends.  play_album
-                    # uses individual spotify:track URIs so Mopidy keeps the
-                    # full queue and can advance normally.
-                    tracks_snap = list(self._tracks)
-                    threading.Thread(
-                        target=self.player.play_album,
-                        args=(tracks_snap, idx),
-                        kwargs={"start_uri": track.get("file", "")},
-                        daemon=True,
-                    ).start()
+                    self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
                     self._song_prev_file     = self._song.get("file", "")
                     self._song_block_until   = 0.0
