@@ -116,6 +116,7 @@ class _SpotifyWebAPI:
             return
         client_id, client_secret = self._credentials()
         if not client_id or not client_secret:
+            log.warning("Spotify Web API: no credentials found in mopidy.conf")
             return
         creds = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         try:
@@ -127,8 +128,12 @@ class _SpotifyWebAPI:
                 timeout=10,
             )
             data = r.json()
-            self._token = data.get("access_token", "")
-            self._token_expires = time.monotonic() + data.get("expires_in", 3600) - 60
+            if "access_token" in data:
+                self._token = data["access_token"]
+                self._token_expires = time.monotonic() + data.get("expires_in", 3600) - 60
+                log.info("Spotify Web API token acquired (expires in %ss)", data.get("expires_in"))
+            else:
+                log.warning("Spotify Web API token error (status %s): %r", r.status_code, data)
         except Exception as e:
             log.warning("Spotify token request failed: %s", e)
 
