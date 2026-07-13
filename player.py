@@ -447,8 +447,9 @@ class MopidyPlayer:
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
         if not tl_tracks:
-            # Album URI not directly addable — browse for individual track URIs.
+            log.warning("tracklist.add empty for %s; trying browse fallback", album_uri)
             refs = self._rpc("core.library.browse", uri=album_uri) or []
+            log.warning("browse(%s) → %d refs: %r", album_uri, len(refs), refs)
             track_uris = [r["uri"] for r in refs
                           if r.get("type") == "track" and r.get("uri")]
             if track_uris:
