@@ -916,8 +916,11 @@ class App:
                         if bitrate > 0 or timed_out:
                             self._song_guard_file = ""
                     elif timed_out:
+                        # Timed out but MPD still reports the old file — clear
+                        # the guard without reverting _song (keep showing the
+                        # track we're switching to; poll will catch up when
+                        # Spotify actually starts it).
                         self._song_guard_file = ""
-                        self._song = song
                     # else: wrong file, still within timeout → skip
                 else:
                     self._song = song
