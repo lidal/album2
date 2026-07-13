@@ -3048,6 +3048,15 @@ class App:
                         "bt_addr":      dev["address"],
                         "bt_connected": False,
                     })
+
+        # Re-derive active flag from the actual PA default so it's correct
+        # regardless of how _sinks_pactl() computed it.
+        if self.audio and self.audio.available:
+            default_pa = self.audio.get_default_sink_pa()
+            if default_pa:
+                for item in items:
+                    item["active"] = (item.get("id") or "") == default_pa
+
         return items
 
     def _speaker_btn_pos(self):

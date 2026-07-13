@@ -97,6 +97,14 @@ class AudioOutputManager:
         IDs are PA sink names so BT address matching is reliable."""
         return self._sinks_pactl()
 
+    def get_default_sink_pa(self) -> str:
+        """Return the current default PA sink name."""
+        name = _run("pactl", "get-default-sink").strip()
+        if not name:
+            m = re.search(r"Default Sink:\s+(\S+)", _run("pactl", "info"))
+            name = m.group(1) if m else ""
+        return name
+
     def _sinks_pactl(self) -> list[dict]:
         out  = _run("pactl", "list", "sinks")
         info = _run("pactl", "info")
