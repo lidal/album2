@@ -1995,12 +1995,12 @@ class App:
 
         def _run():
             albums = list(self._albums)
-
-            # Pass 1: load all track lists so we know the real total upfront.
-            all_tracks: list[dict] = []
-            for album in albums:
+            total  = len(albums)
+            for i, album in enumerate(albums):
                 if self._lyrics_bulk_progress is None:
-                    return
+                    return   # cancelled
+                self._lyrics_bulk_progress = (i, total)
+                self._dirty = True
                 tracks = album.get("tracks") or []
                 if not tracks:
                     try:
@@ -2009,39 +2009,27 @@ class App:
                     except Exception:
                         log.exception("bulk lyrics: failed loading %s", album.get("name"))
                         tracks = []
-                all_tracks.extend(tracks)
-
-            total = len(all_tracks)
-            self._lyrics_bulk_progress = (0, total)
-            self._dirty = True
-            log.info("bulk lyrics: %d tracks total", total)
-
-            # Pass 2: fetch lyrics for each track.
-            for done, track in enumerate(all_tracks):
-                if self._lyrics_bulk_progress is None:
-                    return   # cancelled
-                uri = track.get("file", "")
-                if uri and uri not in self._lyrics_cache:
-                    snap = {
-                        "title":  track.get("title", ""),
-                        "artist": track.get("artist", ""),
-                        "album":  track.get("album", ""),
-                        "file":   uri,
-                    }
-                    try:
-                        text   = self._load_lyrics_for_uri(uri, song=snap, status={})
-                        parsed = self._parse_lyrics(text) if text else None
-                    except Exception:
-                        log.exception("bulk lyrics: failed for %s", uri)
-                        parsed = None
-                    self._lyrics_cache[uri] = parsed
-                self._lyrics_bulk_progress = (done + 1, total)
-                self._dirty = True
+                for track in tracks:
+                    uri = track.get("file", "")
+                    if uri and uri not in self._lyrics_cache:
+                        snap = {
+                            "title":  track.get("title", ""),
+                            "artist": track.get("artist", ""),
+                            "album":  track.get("album", ""),
+                            "file":   uri,
+                        }
+                        try:
+                            text   = self._load_lyrics_for_uri(uri, song=snap, status={})
+                            parsed = self._parse_lyrics(text) if text else None
+                        except Exception:
+                            log.exception("bulk lyrics: failed for %s", uri)
+                            parsed = None
+                        self._lyrics_cache[uri] = parsed
 
             self._lyrics_bulk_progress = None
             self._lyrics_bulk_done     = True
             self._dirty = True
-            log.info("bulk lyrics: done — %d tracks processed", total)
+            log.info("bulk lyrics: done — %d albums processed", total)
 
         threading.Thread(target=_run, daemon=True).start()
 
