@@ -2269,7 +2269,7 @@ class App:
         self.screen.set_clip(0, y_start, W, avail_h)
 
         a_foc   = alpha / 255
-        a_dim   = alpha * 0.35 / 255
+        a_dim   = alpha * 0.60 / 255
         for i in range(-1, n_vis_v + 2):
             vi = v_start + i
             if vi < 0 or vi >= total_vis:
