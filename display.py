@@ -1940,6 +1940,7 @@ class App:
 
     def _load_lyrics_for_uri(self, uri: str) -> str | None:
         path = self._resolve_music_path(uri)
+        log.info("lyrics: loading for uri=%s path=%s", uri, path)
 
         # 1. embedded tags (FLAC / MP3 via mutagen)
         if path and path.lower().endswith(".flac"):
@@ -1948,27 +1949,34 @@ class App:
                 f = FLAC(path)
                 for tag in ("LYRICS", "UNSYNCEDLYRICS", "lyrics", "unsyncedlyrics"):
                     if tag in f:
+                        log.info("lyrics: found embedded tag %r", tag)
                         return "\n".join(f[tag])
+                log.info("lyrics: no embedded tag in FLAC")
             except ImportError:
-                pass
+                log.info("lyrics: mutagen not available, skipping embedded")
             except Exception as e:
-                log.debug("lyrics embedded load: %s", e)
+                log.warning("lyrics: embedded load error: %s", e)
 
         # 2. sidecar .lrc file (same dir, same stem)
         if path:
             try:
                 lrc_path = os.path.splitext(path)[0] + ".lrc"
+                log.info("lyrics: checking sidecar %s", lrc_path)
                 if os.path.exists(lrc_path):
                     with open(lrc_path, encoding="utf-8", errors="replace") as fh:
+                        log.info("lyrics: found sidecar .lrc")
                         return fh.read()
+                else:
+                    log.info("lyrics: no sidecar .lrc")
             except Exception as e:
-                log.debug("lyrics lrc load: %s", e)
+                log.warning("lyrics: sidecar load error: %s", e)
 
         # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
         song   = self._song
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
         title  = (song.get("title") or "").strip()
         album  = (song.get("album") or "").strip()
+        log.info("lyrics: song metadata — artist=%r title=%r album=%r", artist, title, album)
         if artist and title:
             try:
                 import urllib.parse
@@ -1981,22 +1989,29 @@ class App:
                 if duration:
                     params["duration"] = duration
                 url = "https://lrclib.net/api/get?" + urllib.parse.urlencode(params)
+                log.info("lyrics: trying lrclib.net — %s", url)
                 r = __import__("requests").get(url, timeout=10)
+                log.info("lyrics: lrclib.net status %s", r.status_code)
                 if r.status_code == 200:
                     data = r.json()
-                    if not data.get("instrumental"):
+                    if data.get("instrumental"):
+                        log.info("lyrics: lrclib.net says instrumental, skipping")
+                    else:
                         synced = (data.get("syncedLyrics") or "").strip()
                         if synced:
-                            log.info("Lyrics (synced) from lrclib.net for %s – %s", artist, title)
+                            log.info("lyrics: lrclib.net returned synced LRC (%d chars)", len(synced))
                             return synced
                         plain = (data.get("plainLyrics") or "").strip()
                         if plain:
-                            log.info("Lyrics (plain) from lrclib.net for %s – %s", artist, title)
+                            log.info("lyrics: lrclib.net returned plain text (%d chars)", len(plain))
                             return plain
+                        log.info("lyrics: lrclib.net 200 but both syncedLyrics and plainLyrics empty")
                 else:
-                    log.debug("lrclib.net: %s for %s – %s", r.status_code, artist, title)
+                    log.info("lyrics: lrclib.net returned %s", r.status_code)
             except Exception as e:
-                log.debug("lrclib.net fetch failed: %s", e)
+                log.warning("lyrics: lrclib.net fetch failed: %s", e)
+        else:
+            log.info("lyrics: missing artist or title, skipping API lookups")
 
         # 4. lyrics.ovh (plain text fallback)
         if artist and title:
@@ -2005,17 +2020,21 @@ class App:
                 url = ("https://api.lyrics.ovh/v1/"
                        + urllib.parse.quote(artist) + "/"
                        + urllib.parse.quote(title))
+                log.info("lyrics: trying lyrics.ovh — %s", url)
                 r = __import__("requests").get(url, timeout=10)
+                log.info("lyrics: lyrics.ovh status %s", r.status_code)
                 if r.status_code == 200:
                     text = r.json().get("lyrics", "").strip()
                     if text:
-                        log.info("Lyrics (plain) from lyrics.ovh for %s – %s", artist, title)
+                        log.info("lyrics: lyrics.ovh returned plain text (%d chars)", len(text))
                         return text
+                    log.info("lyrics: lyrics.ovh 200 but lyrics field empty")
                 else:
-                    log.debug("lyrics.ovh: %s for %s – %s", r.status_code, artist, title)
+                    log.info("lyrics: lyrics.ovh returned %s", r.status_code)
             except Exception as e:
-                log.debug("lyrics.ovh fetch failed: %s", e)
+                log.warning("lyrics: lyrics.ovh fetch failed: %s", e)
 
+        log.info("lyrics: all sources exhausted, no lyrics found")
         return None
 
     def _parse_lyrics(self, text: str) -> tuple:
