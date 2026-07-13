@@ -482,12 +482,13 @@ class MopidyPlayer:
             artists = t.get("artists", [])
             alb_obj = t.get("album") if isinstance(t.get("album"), dict) else {}
             result.append({
-                "file":   uri,
-                "title":  t.get("name", ""),
-                "artist": artists[0].get("name", "") if artists else "",
-                "album":  alb_obj.get("name", "") if isinstance(alb_obj, dict) else "",
-                "track":  t.get("track_no") or 0,
-                "disc":   t.get("disc_no")  or 1,
+                "file":     uri,
+                "title":    t.get("name", ""),
+                "artist":   artists[0].get("name", "") if artists else "",
+                "album":    alb_obj.get("name", "") if isinstance(alb_obj, dict) else "",
+                "track":    t.get("track_no") or 0,
+                "disc":     t.get("disc_no")  or 1,
+                "duration": (t.get("length") or 0) // 1000,
             })
         def _sort_key(t):
             try:
@@ -529,12 +530,13 @@ class MopidyPlayer:
             uri     = t.get("uri", "")
             artists = t.get("artists", [])
             result.append({
-                "file":   uri,
-                "title":  t.get("name", ""),
-                "artist": artists[0].get("name", "") if artists else "",
-                "album":  (t.get("album") or {}).get("name", ""),
-                "track":  t.get("track_no") or 0,
-                "disc":   t.get("disc_no")  or 1,
+                "file":     uri,
+                "title":    t.get("name", ""),
+                "artist":   artists[0].get("name", "") if artists else "",
+                "album":    (t.get("album") or {}).get("name", ""),
+                "track":    t.get("track_no") or 0,
+                "disc":     t.get("disc_no")  or 1,
+                "duration": (t.get("length") or 0) // 1000,
             })
         def _sort_key(t):
             try:
@@ -569,12 +571,13 @@ class MopidyPlayer:
             t       = tlt.get("track", {}) if isinstance(tlt, dict) else {}
             artists = t.get("artists", [])
             tracks.append({
-                "file":   t.get("uri", ""),
-                "title":  t.get("name", ""),
-                "artist": artists[0].get("name", "") if artists else "",
-                "album":  (t.get("album") or {}).get("name", ""),
-                "track":  t.get("track_no") or 0,
-                "disc":   t.get("disc_no")  or 1,
+                "file":     t.get("uri", ""),
+                "title":    t.get("name", ""),
+                "artist":   artists[0].get("name", "") if artists else "",
+                "album":    (t.get("album") or {}).get("name", ""),
+                "track":    t.get("track_no") or 0,
+                "disc":     t.get("disc_no")  or 1,
+                "duration": (t.get("length") or 0) // 1000,
             })
         if tl_tracks:
             self._rpc("core.playback.play", tlid=tl_tracks[0]["tlid"])

@@ -1964,10 +1964,41 @@ class App:
             except Exception as e:
                 log.debug("lyrics lrc load: %s", e)
 
-        # 3. lyrics.ovh API (free, no key required)
+        # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
         song   = self._song
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
         title  = (song.get("title") or "").strip()
+        album  = (song.get("album") or "").strip()
+        if artist and title:
+            try:
+                import urllib.parse
+                time_str = self._status.get("time", "")
+                tparts   = time_str.split(":")
+                duration = int(float(tparts[1])) if len(tparts) >= 2 else 0
+                params: dict = {"artist_name": artist, "track_name": title}
+                if album:
+                    params["album_name"] = album
+                if duration:
+                    params["duration"] = duration
+                url = "https://lrclib.net/api/get?" + urllib.parse.urlencode(params)
+                r = __import__("requests").get(url, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    if not data.get("instrumental"):
+                        synced = (data.get("syncedLyrics") or "").strip()
+                        if synced:
+                            log.info("Lyrics (synced) from lrclib.net for %s – %s", artist, title)
+                            return synced
+                        plain = (data.get("plainLyrics") or "").strip()
+                        if plain:
+                            log.info("Lyrics (plain) from lrclib.net for %s – %s", artist, title)
+                            return plain
+                else:
+                    log.debug("lrclib.net: %s for %s – %s", r.status_code, artist, title)
+            except Exception as e:
+                log.debug("lrclib.net fetch failed: %s", e)
+
+        # 4. lyrics.ovh (plain text fallback)
         if artist and title:
             try:
                 import urllib.parse
@@ -1978,10 +2009,10 @@ class App:
                 if r.status_code == 200:
                     text = r.json().get("lyrics", "").strip()
                     if text:
-                        log.info("Lyrics fetched from lyrics.ovh for %s – %s", artist, title)
+                        log.info("Lyrics (plain) from lyrics.ovh for %s – %s", artist, title)
                         return text
                 else:
-                    log.debug("lyrics.ovh: %s %s/%s", r.status_code, artist, title)
+                    log.debug("lyrics.ovh: %s for %s – %s", r.status_code, artist, title)
             except Exception as e:
                 log.debug("lyrics.ovh fetch failed: %s", e)
 
