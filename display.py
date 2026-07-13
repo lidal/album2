@@ -76,6 +76,8 @@ from config import (
 
 log = logging.getLogger(__name__)
 
+_LYRICS_CACHE_DIR = os.path.expanduser("~/.cache/album2/lyrics")
+
 _LRC_TS_RE = re.compile(r'^\[(\d+):(\d+(?:\.\d+)?)\]')   # capture mm:ss.xx
 _LRC_META_RE = re.compile(r'^\[\w+:[^\]]*\]')             # metadata like [ti:...]
 
@@ -1991,6 +1993,29 @@ class App:
         base = MUSIC_DIR or os.path.expanduser("~/Music")
         return os.path.join(base, rel)
 
+    def _lrc_disk_path(self, uri: str, path: str | None) -> str | None:
+        """Return the .lrc file path to use for disk caching.
+
+        Local tracks: sidecar next to the audio file.
+        Spotify / other remote tracks: ~/.cache/album2/lyrics/{track_id}.lrc
+        """
+        if path and not uri.startswith("spotify:") and not uri.startswith("http"):
+            return os.path.splitext(path)[0] + ".lrc"
+        if uri.startswith("spotify:track:"):
+            track_id = uri.split(":")[-1]
+            return os.path.join(_LYRICS_CACHE_DIR, f"spotify_track_{track_id}.lrc")
+        return None
+
+    def _save_lrc(self, lrc_path: str, text: str):
+        """Write *text* to *lrc_path*, creating parent dirs as needed."""
+        try:
+            os.makedirs(os.path.dirname(lrc_path), exist_ok=True)
+            with open(lrc_path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            log.info("lyrics: saved to %s", lrc_path)
+        except Exception as e:
+            log.warning("lyrics: could not save lrc: %s", e)
+
     def _load_lyrics_for_uri(self, uri: str,
                              song: dict | None = None,
                              status: dict | None = None) -> str | None:
@@ -1998,10 +2023,11 @@ class App:
             song = self._song
         if status is None:
             status = self._status
-        path = self._resolve_music_path(uri)
-        log.info("lyrics: loading for uri=%s path=%s", uri, path)
+        path     = self._resolve_music_path(uri)
+        lrc_path = self._lrc_disk_path(uri, path)
+        log.info("lyrics: loading for uri=%s lrc_path=%s", uri, lrc_path)
 
-        # 1. embedded tags (FLAC / MP3 via mutagen)
+        # 1. embedded tags (FLAC via mutagen)
         if path and path.lower().endswith(".flac"):
             try:
                 from mutagen.flac import FLAC
@@ -2016,19 +2042,14 @@ class App:
             except Exception as e:
                 log.warning("lyrics: embedded load error: %s", e)
 
-        # 2. sidecar .lrc file (same dir, same stem)
-        if path:
+        # 2. disk-cached .lrc file (sidecar for local, cache dir for Spotify)
+        if lrc_path and os.path.exists(lrc_path):
             try:
-                lrc_path = os.path.splitext(path)[0] + ".lrc"
-                log.info("lyrics: checking sidecar %s", lrc_path)
-                if os.path.exists(lrc_path):
-                    with open(lrc_path, encoding="utf-8", errors="replace") as fh:
-                        log.info("lyrics: found sidecar .lrc")
-                        return fh.read()
-                else:
-                    log.info("lyrics: no sidecar .lrc")
+                with open(lrc_path, encoding="utf-8", errors="replace") as fh:
+                    log.info("lyrics: found cached .lrc at %s", lrc_path)
+                    return fh.read()
             except Exception as e:
-                log.warning("lyrics: sidecar load error: %s", e)
+                log.warning("lyrics: lrc read error: %s", e)
 
         # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
@@ -2055,27 +2076,25 @@ class App:
                 if r.status_code == 200:
                     lrclib_data = r.json()
                 elif r.status_code == 404:
-                    # Exact match not found — try fuzzy search
                     s_url = ("https://lrclib.net/api/search?"
                              + urllib.parse.urlencode({"artist_name": artist,
                                                        "track_name":  title}))
-                    log.info("lyrics: lrclib.net get 404, trying search — %s", s_url)
+                    log.info("lyrics: lrclib.net 404, trying search — %s", s_url)
                     sr = req.get(s_url, timeout=10)
                     log.info("lyrics: lrclib.net search status %s", sr.status_code)
                     if sr.status_code == 200:
                         results = sr.json()
                         log.info("lyrics: lrclib.net search returned %d results", len(results))
-                        # prefer a result with synced lyrics; fall back to first with plain
                         for res in results:
                             if (res.get("syncedLyrics") or "").strip():
                                 lrclib_data = res
-                                log.info("lyrics: using lrclib.net search result id=%s", res.get("id"))
+                                log.info("lyrics: using search result id=%s", res.get("id"))
                                 break
                         if lrclib_data is None:
                             for res in results:
                                 if (res.get("plainLyrics") or "").strip():
                                     lrclib_data = res
-                                    log.info("lyrics: using lrclib.net search result (plain) id=%s", res.get("id"))
+                                    log.info("lyrics: using search result (plain) id=%s", res.get("id"))
                                     break
                 if lrclib_data is not None:
                     if lrclib_data.get("instrumental"):
@@ -2083,13 +2102,17 @@ class App:
                     else:
                         synced = (lrclib_data.get("syncedLyrics") or "").strip()
                         if synced:
-                            log.info("lyrics: lrclib.net returned synced LRC (%d chars)", len(synced))
+                            log.info("lyrics: lrclib.net synced LRC (%d chars)", len(synced))
+                            if lrc_path:
+                                self._save_lrc(lrc_path, synced)
                             return synced
                         plain = (lrclib_data.get("plainLyrics") or "").strip()
                         if plain:
-                            log.info("lyrics: lrclib.net returned plain text (%d chars)", len(plain))
+                            log.info("lyrics: lrclib.net plain text (%d chars)", len(plain))
+                            if lrc_path:
+                                self._save_lrc(lrc_path, plain)
                             return plain
-                        log.info("lyrics: lrclib.net both syncedLyrics and plainLyrics empty")
+                        log.info("lyrics: lrclib.net both fields empty")
                 else:
                     log.info("lyrics: lrclib.net no result found")
             except Exception as e:
@@ -2110,7 +2133,9 @@ class App:
                 if r.status_code == 200:
                     text = r.json().get("lyrics", "").strip()
                     if text:
-                        log.info("lyrics: lyrics.ovh returned plain text (%d chars)", len(text))
+                        log.info("lyrics: lyrics.ovh plain text (%d chars)", len(text))
+                        if lrc_path:
+                            self._save_lrc(lrc_path, text)
                         return text
                     log.info("lyrics: lyrics.ovh 200 but lyrics field empty")
                 else:
