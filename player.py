@@ -193,6 +193,10 @@ class MopidyPlayer:
 
         self._status: dict = {}
         self._song: dict   = {}
+        # Set to a future monotonic time while play_album / play_album_fast is
+        # rebuilding the queue.  The auto-advance in _poll_loop must not fire
+        # during this window — the tracklist.clear causes a spurious stop-state.
+        self._queue_rebuild_until: float = 0.0
 
         t = threading.Thread(target=self._poll_loop, daemon=True)
         t.start()
@@ -217,7 +221,11 @@ class MopidyPlayer:
                     _prev_had_next = "nextsong" in status
                     _stop_since    = 0.0
                 elif state == "stop":
-                    if _stop_since == 0.0:
+                    if time.monotonic() < self._queue_rebuild_until:
+                        # Queue is being rebuilt — ignore stop state entirely.
+                        _prev_had_next = False
+                        _stop_since    = 0.0
+                    elif _stop_since == 0.0:
                         _stop_since = time.monotonic()
                         log.info("poll: state=stop  had_next=%s  nextsong_id=%s  qlen=%s",
                                  _prev_had_next,
@@ -598,13 +606,14 @@ class MopidyPlayer:
         return sorted(result, key=_sort_key)
 
     def play_album_fast(self, album_uri: str) -> list[dict]:
-        self._reset_tracklist_options()
         """Add *album_uri* to tracklist and start playing immediately.
 
         Uses a single core.tracklist.add(uri=...) call which is faster than
         a separate library.lookup + N individual adds. Returns track dicts
         parsed from the response so the caller can populate the UI.
         """
+        self._queue_rebuild_until = time.monotonic() + 30.0
+        self._reset_tracklist_options()
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
         if not tl_tracks:
@@ -636,6 +645,7 @@ class MopidyPlayer:
             self._rpc("core.playback.play", tlid=tl_tracks[0]["tlid"])
             with self._ctrl_lock:
                 self._status["state"] = "play"
+        self._queue_rebuild_until = 0.0
         def _sort_key(t):
             try:
                 return (int(t["disc"]), int(t["track"]))
@@ -669,6 +679,7 @@ class MopidyPlayer:
         """
         if not tracks:
             return
+        self._queue_rebuild_until = time.monotonic() + 30.0
         self._reset_tracklist_options()
         uris = [t["file"] for t in tracks if "file" in t]
         self._rpc("core.tracklist.clear")
@@ -685,6 +696,7 @@ class MopidyPlayer:
             tlid = tl_tracks[track_index]["tlid"]
         if tlid is not None:
             self._rpc("core.playback.play", tlid=tlid)
+        self._queue_rebuild_until = 0.0
         with self._ctrl_lock:
             self._status["state"] = "play"
 
