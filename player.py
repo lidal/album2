@@ -227,14 +227,6 @@ class MopidyPlayer:
                     _prev_had_next = "nextsong" in status
                     _stop_since    = 0.0
                 elif state in ("stop", "pause"):
-                    log.info("poll: state=%s  had_next=%s  qlen=%s  since=%.1f  "
-                             "active=%d  recovering=%s  rebuild=%.0f",
-                             state, _prev_had_next,
-                             status.get("playlistlength", "—"),
-                             time.monotonic() - _stop_since if _stop_since else 0.0,
-                             len(self._active_tracks),
-                             self._recovery_in_progress,
-                             max(0.0, self._queue_rebuild_until - time.monotonic()))
                     if state != "stop":
                         pass  # pause: don't touch _stop_since or advance
                     elif time.monotonic() < self._queue_rebuild_until:
