@@ -45,6 +45,30 @@ class AudioOutputManager:
                 if parts:
                     _run("pactl", "move-sink-input", parts[0], sink_id)
 
+    def set_sink_pa(self, pa_name: str):
+        """Switch to a sink by its PulseAudio/PipeWire name.
+
+        Works on both backends: PipeWire exposes a PA-compatible protocol so
+        pactl always works alongside wpctl, and pactl sink names include the
+        BT device address which is how we identify BT sinks reliably.
+        """
+        _run("pactl", "set-default-sink", pa_name)
+        inputs = _run("pactl", "list", "sink-inputs", "short")
+        for line in inputs.splitlines():
+            parts = line.split()
+            if parts:
+                _run("pactl", "move-sink-input", parts[0], pa_name)
+
+    def bt_sink_pa_name(self, addr: str) -> str:
+        """Return the PA sink name for *addr* if a BT audio sink is active, else ''."""
+        addr_u = addr.replace(":", "_")
+        out = _run("pactl", "list", "sinks", "short")
+        for line in out.splitlines():
+            if addr_u in line:
+                parts = line.split()
+                return parts[1] if len(parts) > 1 else ""
+        return ""
+
     # ── backends ──────────────────────────────────────────────────────────────
 
     def _sinks_wpctl(self) -> list[dict]:

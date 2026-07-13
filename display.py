@@ -3014,11 +3014,28 @@ class App:
         items = [dict(s, bt_addr=None, bt_connected=True) for s in sinks]
         if self.bt and self.bt.available:
             for dev in self.bt.get_devices():
-                addr_u = dev["address"].replace(":", "_")
-                if any(addr_u in s["id"] for s in sinks):
+                pa_name = (self.audio.bt_sink_pa_name(dev["address"])
+                           if self.audio else "")
+                if pa_name:
+                    # BT device has an active audio sink — annotate the matching
+                    # entry in items (match by PA name substring in the sink id).
+                    matched = False
                     for item in items:
-                        if item["id"] and addr_u in item["id"]:
+                        sid = item.get("id") or ""
+                        if pa_name in sid or sid in pa_name:
                             item["bt_addr"] = dev["address"]
+                            matched = True
+                            break
+                    if not matched:
+                        # Sink exists in PA but not in our list (e.g. wpctl uses
+                        # numeric IDs): add it so the user can select it.
+                        items.append({
+                            "id":           pa_name,
+                            "name":         dev["name"],
+                            "active":       False,
+                            "bt_addr":      dev["address"],
+                            "bt_connected": True,
+                        })
                 else:
                     items.append({
                         "id":           None,
@@ -3325,15 +3342,19 @@ class App:
                     self._audio_busy_id = busy_key
                     self._dirty = True
                     def _switch(snk=sink):
-                        sid      = snk["id"]
-                        bt_addr  = snk.get("bt_addr")
+                        bt_addr = snk.get("bt_addr")
+                        pa_name = snk.get("id") if snk.get("bt_connected") else None
                         if bt_addr and not snk.get("bt_connected"):
                             self.bt.connect(bt_addr)
-                            import time; time.sleep(2)
-                            # PA sink name follows BlueZ convention
-                            sid = "bluez_sink." + bt_addr.replace(":", "_") + ".a2dp_sink"
-                        if sid and self.audio and self.audio.available:
-                            self.audio.set_sink(sid)
+                            # Poll for the PA sink to appear (up to 10 s).
+                            for _ in range(20):
+                                time.sleep(0.5)
+                                pa_name = (self.audio.bt_sink_pa_name(bt_addr)
+                                           if self.audio else "")
+                                if pa_name:
+                                    break
+                        if pa_name and self.audio and self.audio.available:
+                            self.audio.set_sink_pa(pa_name)
                         self._audio_sinks      = self._build_audio_items()
                         self._audio_busy_id    = None
                         self._audio_popup_open = False
