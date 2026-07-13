@@ -408,6 +408,17 @@ class MopidyPlayer:
         """Return track dicts for a Spotify album URI, sorted by disc/track."""
         lookup = self._rpc("core.library.lookup", uris=[album_uri]) or {}
         track_list = lookup.get(album_uri, [])
+        if not track_list:
+            # Some albums (unusual releases, hidden albums) can't be looked up
+            # by album URI directly — browse to get individual track URIs, then
+            # look those up one batch at a time.
+            refs = self._rpc("core.library.browse", uri=album_uri) or []
+            track_uris = [r["uri"] for r in refs
+                          if r.get("type") == "track" and r.get("uri")]
+            if track_uris:
+                lookup2 = self._rpc("core.library.lookup", uris=track_uris) or {}
+                for uri in track_uris:
+                    track_list.extend(lookup2.get(uri, []))
         result = []
         for t in track_list:
             uri     = t.get("uri", "")
@@ -436,6 +447,13 @@ class MopidyPlayer:
         """
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
+        if not tl_tracks:
+            # Album URI not directly addable — browse for individual track URIs.
+            refs = self._rpc("core.library.browse", uri=album_uri) or []
+            track_uris = [r["uri"] for r in refs
+                          if r.get("type") == "track" and r.get("uri")]
+            if track_uris:
+                tl_tracks = self._rpc("core.tracklist.add", uris=track_uris) or []
         tracks = []
         for tlt in tl_tracks:
             t       = tlt.get("track", {}) if isinstance(tlt, dict) else {}
