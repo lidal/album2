@@ -200,7 +200,8 @@ class MopidyPlayer:
     # ── internal: status poll ─────────────────────────────────────────────────
 
     def _poll_loop(self):
-        _prev_had_next = False   # True if the previous "play" tick had a nextsong
+        _prev_had_next = False
+        _stop_since    = 0.0     # monotonic time when "stop" state first seen
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -214,18 +215,24 @@ class MopidyPlayer:
                 state = status.get("state", "")
                 if state == "play":
                     _prev_had_next = "nextsong" in status
-                elif state == "stop" and _prev_had_next:
-                    # Stopped while there was still a next track — Spotify stream drop.
-                    log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
-                    _prev_had_next = False
-                    with self._ctrl_lock:
-                        try:
-                            self._ctrl.next()
-                            self._ctrl.play()
-                            status = self._ctrl.status()
-                            song   = self._ctrl.currentsong()
-                        except Exception as e:
-                            log.warning("auto-advance failed: %s", e)
+                    _stop_since    = 0.0
+                elif state == "stop":
+                    if _stop_since == 0.0:
+                        _stop_since = time.monotonic()
+                    # Only auto-advance after 1 s — avoids firing during brief
+                    # stop-states that occur when clicking a track to seek.
+                    elif _prev_had_next and time.monotonic() - _stop_since > 1.0:
+                        log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
+                        _prev_had_next = False
+                        _stop_since    = 0.0
+                        with self._ctrl_lock:
+                            try:
+                                self._ctrl.next()
+                                self._ctrl.play()
+                                status = self._ctrl.status()
+                                song   = self._ctrl.currentsong()
+                            except Exception as e:
+                                log.warning("auto-advance failed: %s", e)
                 with self._ctrl_lock:
                     self._status = status
                     self._song   = song
@@ -378,7 +385,12 @@ class MopidyPlayer:
             self._cmd("seekcur", str(fraction * dur_s))
 
     def play_track_in_queue(self, pos: int, track: dict | None = None):
-        """Play by position in the current queue (0-indexed)."""
+        """Play the given track in the current queue.
+
+        Looks up the track by URI via Mopidy JSON-RPC so the tlid (not
+        position) is used — avoids mismatches when the UI sort order differs
+        from the MPD playlist order. Falls back to position-based play.
+        """
         with self._ctrl_lock:
             self._status["state"] = "play"
             if track:
@@ -388,7 +400,17 @@ class MopidyPlayer:
                     "album":  track.get("album", ""),
                     "file":   track.get("file", ""),
                 }
-        threading.Thread(target=self._cmd, args=("play", str(pos)), daemon=True).start()
+        uri = track.get("file", "") if track else ""
+        def _play(uri=uri, pos=pos):
+            if uri:
+                tl_tracks = self._rpc("core.tracklist.get_tl_tracks") or []
+                for tlt in tl_tracks:
+                    t = (tlt.get("track") or {}) if isinstance(tlt, dict) else {}
+                    if t.get("uri") == uri:
+                        self._rpc("core.playback.play", tlid=tlt["tlid"])
+                        return
+            self._cmd("play", str(pos))
+        threading.Thread(target=_play, daemon=True).start()
 
     def set_song_optimistic(self, song: dict):
         """Immediately update the current-song cache without waiting for the poll loop."""
