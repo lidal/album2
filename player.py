@@ -219,6 +219,10 @@ class MopidyPlayer:
                 elif state == "stop":
                     if _stop_since == 0.0:
                         _stop_since = time.monotonic()
+                        log.info("poll: state=stop  had_next=%s  nextsong_id=%s  qlen=%s",
+                                 _prev_had_next,
+                                 status.get("nextsongid", "—"),
+                                 status.get("playlistlength", "—"))
                     # Only auto-advance after 1 s — avoids firing during brief
                     # stop-states that occur when clicking a track to seek.
                     elif _prev_had_next and time.monotonic() - _stop_since > 1.0:
