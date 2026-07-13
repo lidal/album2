@@ -484,11 +484,11 @@ class App:
         self._loading_album    = False
         # monotonic deadline before which backwards elapsed jumps are ignored (post-seek buffer)
         self._seek_guard_until = 0.0
-        # URI we expect after a track tap; poll skips _song updates until MPD
-        # reports this URI. After confirmation, a 1s cooldown blocks any further
-        # file changes so Spotify buffering churn can't revert the display.
-        self._song_guard_file: str    = ""
-        self._song_guard_until: float = 0.0
+        # URI we expect after a track tap. Guard stays active (blocking wrong-file
+        # updates) until MPD confirms the URI AND bitrate > 0 (audio flowing),
+        # or until the 5s hard timeout fires.
+        self._song_guard_file: str     = ""
+        self._song_guard_timeout: float = 0.0
 
         # thumbnail loader
         self._thumb_pool    = concurrent.futures.ThreadPoolExecutor(max_workers=THUMB_WORKERS)
@@ -909,13 +909,16 @@ class App:
             if song:
                 f = song.get("file", "")
                 if self._song_guard_file:
+                    timed_out = now > self._song_guard_timeout
+                    bitrate   = int(status.get("bitrate", 0) or 0)
                     if f == self._song_guard_file:
-                        self._song_guard_file  = ""
-                        self._song_guard_until = now + 1.0
                         self._song = song
-                    # else: guard active, wrong file → skip
-                elif now < self._song_guard_until and f != self._song.get("file"):
-                    pass  # post-confirm hold: block file changes for 1s
+                        if bitrate > 0 or timed_out:
+                            self._song_guard_file = ""
+                    elif timed_out:
+                        self._song_guard_file = ""
+                        self._song = song
+                    # else: wrong file, still within timeout → skip
                 else:
                     self._song = song
             new_uri = self._song.get("file", "")
@@ -3337,7 +3340,8 @@ class App:
                     track = self._tracks[idx]
                     self.player.play_track_in_queue(idx, track)
                     self._reset_elapsed()
-                    self._song_guard_file = track.get("file", "")
+                    self._song_guard_file    = track.get("file", "")
+                    self._song_guard_timeout = time.monotonic() + 5.0
                     # Set directly — player._song may be overwritten by the poll
                     # thread between play_track_in_queue and get_current_song().
                     self._song = {
