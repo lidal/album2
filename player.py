@@ -9,6 +9,7 @@ Album art / images come from the Mopidy HTTP JSON-RPC API because it handles
 all back-ends (local files, Spotify, etc.) transparently.
 """
 from __future__ import annotations
+import base64
 import os
 import threading
 import time
@@ -74,6 +75,92 @@ def _connect(client: mpd.MPDClient) -> bool:
     except Exception as e:
         log.warning("MPD connect failed: %s", e)
         return False
+
+
+_MOPIDY_CONF = os.path.expanduser("~/.config/mopidy/mopidy.conf")
+
+class _SpotifyWebAPI:
+    """Minimal Spotify Web API client using Client Credentials auth.
+
+    Used as a last-resort fallback when mopidy-spotify can't fetch tracks for
+    an album URI. Reads credentials from mopidy.conf so they stay in sync.
+    """
+    _TOKEN_URL = "https://accounts.spotify.com/api/token"
+    _API_BASE  = "https://api.spotify.com/v1"
+
+    def __init__(self):
+        self._token: str       = ""
+        self._token_expires: float = 0.0
+        self._lock = threading.Lock()
+
+    def _credentials(self) -> tuple[str, str]:
+        client_id = client_secret = ""
+        try:
+            in_spotify = False
+            with open(_MOPIDY_CONF) as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("["):
+                        in_spotify = s == "[spotify]"
+                    elif in_spotify:
+                        if s.startswith("client_id"):
+                            client_id = s.split("=", 1)[1].strip()
+                        elif s.startswith("client_secret"):
+                            client_secret = s.split("=", 1)[1].strip()
+        except Exception as e:
+            log.warning("Could not read Spotify credentials: %s", e)
+        return client_id, client_secret
+
+    def _ensure_token(self):
+        if time.monotonic() < self._token_expires:
+            return
+        client_id, client_secret = self._credentials()
+        if not client_id or not client_secret:
+            return
+        creds = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        try:
+            r = requests.post(
+                self._TOKEN_URL,
+                headers={"Authorization": f"Basic {creds}",
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                data={"grant_type": "client_credentials"},
+                timeout=10,
+            )
+            data = r.json()
+            self._token = data.get("access_token", "")
+            self._token_expires = time.monotonic() + data.get("expires_in", 3600) - 60
+        except Exception as e:
+            log.warning("Spotify token request failed: %s", e)
+
+    def album_track_uris(self, album_id: str) -> list[str]:
+        """Return spotify:track:xxx URIs for every track in the album."""
+        with self._lock:
+            self._ensure_token()
+            if not self._token:
+                return []
+            uris: list[str] = []
+            url = f"{self._API_BASE}/albums/{album_id}/tracks"
+            params: dict = {"limit": 50}
+            while url:
+                try:
+                    r = requests.get(url, headers={"Authorization": f"Bearer {self._token}"},
+                                     params=params, timeout=10)
+                    data = r.json()
+                    if "error" in data:
+                        log.warning("Spotify API error for %s: %s", album_id, data["error"])
+                        break
+                    for item in data.get("items", []):
+                        if item and item.get("uri"):
+                            uris.append(item["uri"])
+                    url    = data.get("next")  # pagination
+                    params = {}                 # already in the next URL
+                except Exception as e:
+                    log.warning("Spotify API request failed: %s", e)
+                    break
+            return uris
+
+
+_spotify_web = _SpotifyWebAPI()
 
 
 class MopidyPlayer:
@@ -409,15 +496,29 @@ class MopidyPlayer:
         lookup = self._rpc("core.library.lookup", uris=[album_uri]) or {}
         track_list = lookup.get(album_uri, [])
         if not track_list:
-            log.warning("Spotify lookup empty for %s; raw result: %r", album_uri, lookup)
             refs = self._rpc("core.library.browse", uri=album_uri) or []
-            log.warning("Spotify browse %s → %d refs: %r", album_uri, len(refs), refs)
             track_uris = [r["uri"] for r in refs
                           if r.get("type") == "track" and r.get("uri")]
             if track_uris:
                 lookup2 = self._rpc("core.library.lookup", uris=track_uris) or {}
                 for uri in track_uris:
                     track_list.extend(lookup2.get(uri, []))
+        if not track_list:
+            # Last resort: fetch track URIs directly from the Spotify Web API
+            # (mopidy-spotify can't handle some albums via lookup/browse).
+            album_id  = album_uri.split(":")[-1]
+            web_uris  = _spotify_web.album_track_uris(album_id)
+            if web_uris:
+                log.info("Spotify Web API returned %d tracks for %s", len(web_uris), album_uri)
+                lookup3 = self._rpc("core.library.lookup", uris=web_uris) or {}
+                for uri in web_uris:
+                    track_list.extend(lookup3.get(uri, []))
+                if not track_list:
+                    # mopidy lookup of individual tracks also failed — build stubs
+                    # so the tracklist at least shows something playable.
+                    for i, uri in enumerate(web_uris, 1):
+                        track_list.append({"uri": uri, "name": "", "track_no": i, "disc_no": 1,
+                                           "artists": [], "album": None})
         result = []
         for t in track_list:
             uri     = t.get("uri", "")
@@ -447,13 +548,17 @@ class MopidyPlayer:
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
         if not tl_tracks:
-            log.warning("tracklist.add empty for %s; trying browse fallback", album_uri)
             refs = self._rpc("core.library.browse", uri=album_uri) or []
-            log.warning("browse(%s) → %d refs: %r", album_uri, len(refs), refs)
             track_uris = [r["uri"] for r in refs
                           if r.get("type") == "track" and r.get("uri")]
             if track_uris:
                 tl_tracks = self._rpc("core.tracklist.add", uris=track_uris) or []
+        if not tl_tracks:
+            album_id  = album_uri.split(":")[-1]
+            web_uris  = _spotify_web.album_track_uris(album_id)
+            if web_uris:
+                log.info("Spotify Web API returned %d tracks for %s", len(web_uris), album_uri)
+                tl_tracks = self._rpc("core.tracklist.add", uris=web_uris) or []
         tracks = []
         for tlt in tl_tracks:
             t       = tlt.get("track", {}) if isinstance(tlt, dict) else {}
