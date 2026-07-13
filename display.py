@@ -405,6 +405,7 @@ class App:
         self._lyrics_loading:  bool = False
         self._lyrics_scroll:   float = 0.0   # manual scroll offset (visual rows, no-timestamp mode)
         self._lyrics_drag:     bool  = False
+        self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
 
         # action flash feedback
         self._flash_icon:     str | None = None
@@ -974,22 +975,28 @@ class App:
                     self._load_art(canonical)
             # reload lyrics whenever the track changes
             if new_uri and new_uri != self._lyrics_uri and not self._lyrics_loading:
-                self._lyrics_uri     = new_uri
-                self._lyrics         = None
-                self._lyrics_parsed  = None
-                self._lyrics_scroll  = 0.0
-                self._lyrics_loading = True
-                # Snapshot song + status NOW so the thread doesn't race with
-                # poll updates that could change self._song mid-fetch.
-                _snap_song   = dict(self._song)
-                _snap_status = dict(self._status)
-                def _fetch_lyr(u=new_uri, ss=_snap_song, st=_snap_status):
-                    text = self._load_lyrics_for_uri(u, song=ss, status=st)
-                    self._lyrics         = text
-                    self._lyrics_parsed  = self._parse_lyrics(text) if text else None
-                    self._lyrics_loading = False
-                    self._dirty          = True
-                threading.Thread(target=_fetch_lyr, daemon=True).start()
+                self._lyrics_uri    = new_uri
+                self._lyrics        = None
+                self._lyrics_scroll = 0.0
+                if new_uri in self._lyrics_cache:
+                    # Instant cache hit — no network round-trip needed.
+                    self._lyrics_parsed = self._lyrics_cache[new_uri]
+                    self._dirty         = True
+                else:
+                    self._lyrics_parsed  = None
+                    self._lyrics_loading = True
+                    # Snapshot song + status NOW so the thread doesn't race
+                    # with poll updates that could change self._song mid-fetch.
+                    _snap_song   = dict(self._song)
+                    _snap_status = dict(self._status)
+                    def _fetch_lyr(u=new_uri, ss=_snap_song, st=_snap_status):
+                        text   = self._load_lyrics_for_uri(u, song=ss, status=st)
+                        parsed = self._parse_lyrics(text) if text else None
+                        self._lyrics_cache[u]  = parsed
+                        self._lyrics_parsed    = parsed
+                        self._lyrics_loading   = False
+                        self._dirty            = True
+                    threading.Thread(target=_fetch_lyr, daemon=True).start()
 
         # mark dirty for ongoing animations/playback — never clear it here;
         # only draw() clears _dirty after actually rendering a frame
@@ -1722,6 +1729,8 @@ class App:
 
                 album["tracks"] = tracks
                 self._tracks = tracks
+                if tracks and settings.get("lyrics"):
+                    self._prefetch_album_lyrics(tracks)
                 if tracks:
                     t0 = tracks[0]
                     self.player.set_song_optimistic({
@@ -1926,6 +1935,37 @@ class App:
         self.screen.blit(scaled, (cx - size // 2, cy - size // 2))
 
     # ── lyrics ────────────────────────────────────────────────────────────────
+
+    def _prefetch_album_lyrics(self, tracks: list[dict]):
+        """Fetch and cache lyrics for every track in *tracks* sequentially.
+
+        Runs in one background thread so API requests are serialised and we
+        don't hammer lrclib.net with a burst of parallel calls.  Already-
+        cached tracks are skipped, so re-opening the same album is instant.
+        """
+        def _run():
+            for track in tracks:
+                uri = track.get("file", "")
+                if not uri or uri in self._lyrics_cache:
+                    continue
+                snap_song = {
+                    "title":  track.get("title", ""),
+                    "artist": track.get("artist", ""),
+                    "album":  track.get("album", ""),
+                    "file":   uri,
+                }
+                try:
+                    text   = self._load_lyrics_for_uri(uri, song=snap_song, status={})
+                    parsed = self._parse_lyrics(text) if text else None
+                except Exception:
+                    log.exception("prefetch lyrics failed for %s", uri)
+                    parsed = None
+                self._lyrics_cache[uri] = parsed
+                # If this track is currently playing, apply immediately.
+                if self._lyrics_uri == uri and not self._lyrics_loading:
+                    self._lyrics_parsed = parsed
+                    self._dirty = True
+        threading.Thread(target=_run, daemon=True).start()
 
     def _resolve_music_path(self, uri: str) -> str | None:
         """Convert an MPD/Mopidy file URI to an absolute filesystem path."""
