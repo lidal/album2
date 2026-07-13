@@ -409,6 +409,10 @@ class App:
         self._lyrics_drag:     bool  = False
         self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
         self._prefetch_gen:    int   = 0    # incremented on each new album; cancels old prefetch
+        self._lyrics_anim_vis:   float = 0.0  # animated scroll position (visual rows)
+        self._lyrics_target_vis: float = 0.0  # target scroll position
+        self._lyrics_prev_idx:   int   = -1   # last known logical line index
+        self._lyrics_anim_t:     float = 0.0  # monotonic time of last anim update
 
         # action flash feedback
         self._flash_icon:     str | None = None
@@ -980,7 +984,9 @@ class App:
             if new_uri and new_uri != self._lyrics_uri and not self._lyrics_loading:
                 self._lyrics_uri    = new_uri
                 self._lyrics        = None
-                self._lyrics_scroll = 0.0
+                self._lyrics_scroll      = 0.0
+                self._lyrics_prev_idx    = -1   # force snap on first draw
+                self._lyrics_anim_t      = 0.0  # 0 signals "snap immediately"
                 if new_uri in self._lyrics_cache:
                     # Instant cache hit — no network round-trip needed.
                     self._lyrics_parsed = self._lyrics_cache[new_uri]
@@ -2218,27 +2224,36 @@ class App:
         if self._status.get("state") == "play":
             el = min(dur, el + (time.monotonic() - self._elapsed_base_t))
 
-        # current logical line (float, fractional between lines)
+        # current logical line — integer only (no fractional interpolation)
         if times:
             idx = bisect.bisect_right(times, el) - 1
             idx = max(0, min(total - 1, idx))
-            if idx + 1 < total:
-                span = times[idx + 1] - times[idx]
-                frac = (el - times[idx]) / span if span > 0 else 0.0
-                frac = max(0.0, min(1.0, frac))
-            else:
-                frac = 0.0
-            cur_logical = float(idx) + frac
 
-            # map fractional logical position to fractional visual row position
-            li_a    = int(cur_logical)
-            li_b    = min(total - 1, li_a + 1)
-            cur_vis = (first_visual.get(li_a, 0)
-                       + (first_visual.get(li_b, 0) - first_visual.get(li_a, 0))
-                         * (cur_logical - li_a))
-            float_start = cur_vis - n_vis_v * 0.3
-            float_start = max(0.0, min(float(max(0, total_vis - n_vis_v)), float_start))
-            focus_li    = int(cur_logical)
+            # Target scroll: put the active line ~30% from the top
+            target = float(first_visual.get(idx, 0)) - n_vis_v * 0.3
+            target = max(0.0, min(float(max(0, total_vis - n_vis_v)), target))
+
+            now_t = time.monotonic()
+            if idx != self._lyrics_prev_idx:
+                self._lyrics_prev_idx   = idx
+                self._lyrics_target_vis = target
+                if self._lyrics_anim_t == 0.0:
+                    # First draw after lyrics loaded: snap to position, no animation.
+                    self._lyrics_anim_vis = target
+                self._lyrics_anim_t = now_t
+
+            # Ease-out toward target (only animate when target changes).
+            diff = self._lyrics_target_vis - self._lyrics_anim_vis
+            if abs(diff) > 0.02:
+                dt_a = min(0.1, now_t - self._lyrics_anim_t)
+                self._lyrics_anim_t   = now_t
+                self._lyrics_anim_vis += diff * min(1.0, dt_a * 18.0)
+                self._dirty = True
+            else:
+                self._lyrics_anim_vis = self._lyrics_target_vis
+
+            float_start = self._lyrics_anim_vis
+            focus_li    = idx
         else:
             # manual scroll: clamp scroll offset and derive focus from position
             self._lyrics_scroll = max(0.0, min(float(max(0, total_vis - n_vis_v)),
