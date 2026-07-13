@@ -18,6 +18,7 @@ _DEFAULTS: dict = {
     "cal_sy": 1.0, "cal_oy": 0.0,
     "car_reflections":  True,
     "library":          "local",
+    "album_sort":       "artist a→z",
     "spotify_bitrate":  "160",
 }
 

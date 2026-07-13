@@ -231,6 +231,7 @@ _SETTINGS_ITEMS = [
     ("lyrics",      "Show lyrics"),
     (None,          "LIBRARY"),
     ("library",     "Library"),
+    ("album_sort",  "Sort by"),
     (None,          "SPOTIFY"),
     ("spotify_bitrate", "Bitrate"),
     (None,          "GRID"),
@@ -248,6 +249,7 @@ _SETTINGS_ITEMS = [
 # Tapping cycles to the next option; draw code renders a pill instead of a toggle.
 _SETTINGS_SELECTORS: dict[str, tuple[str, ...]] = {
     "library":        ("Local", "Spotify"),
+    "album_sort":     ("Artist A→Z", "Artist Z→A", "Year ↑", "Year ↓", "Album A→Z", "Album Z→A"),
     "spotify_bitrate": ("96", "160", "320"),
 }
 
@@ -551,11 +553,28 @@ class App:
 
     # ── album list + thumbnails ───────────────────────────────────────────────
 
+    @staticmethod
+    def _sort_albums(albums: list[dict]) -> list[dict]:
+        sort = (settings.get("album_sort") or "artist a→z").lower()
+        if sort == "artist z→a":
+            return sorted(albums, key=lambda a: (a["artist"].casefold(), a.get("year") or 9999, a["name"].casefold()), reverse=True)
+        if sort == "year ↑":
+            return sorted(albums, key=lambda a: (a.get("year") or 9999, a["name"].casefold()))
+        if sort == "year ↓":
+            return sorted(albums, key=lambda a: (-(a.get("year") or 0), a["name"].casefold()))
+        if sort == "album a→z":
+            return sorted(albums, key=lambda a: a["name"].casefold())
+        if sort == "album z→a":
+            return sorted(albums, key=lambda a: a["name"].casefold(), reverse=True)
+        # default: artist a→z
+        return sorted(albums, key=lambda a: (a["artist"].casefold(), a.get("year") or 9999, a["name"].casefold()))
+
     def _load_albums(self, gen: int):
         library = settings.get("library") or "local"
         albums = self.player.get_albums(library=library)
         if self._load_gen != gen:   # library switched while we were loading — discard
             return
+        albums = self._sort_albums(albums)
         self._albums         = albums
         self._thumbs_pending = len(albums)
         self._dirty          = True
@@ -3126,6 +3145,8 @@ class App:
                                 settings.set(dk, opt.lower())
                                 if dk == "library":
                                     self._reload_library()
+                                elif dk == "album_sort":
+                                    self._albums = self._sort_albums(self._albums)
                                 elif dk == "spotify_bitrate":
                                     threading.Thread(
                                         target=self._apply_spotify_bitrate,
