@@ -519,18 +519,20 @@ class App:
         """
         small = img.resize((64, 64), Image.LANCZOS).convert("RGB")
         q     = small.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
-        pal   = q.getpalette()[:8 * 3]
+        raw_pal = q.getpalette() or []
+        n_cols  = min(8, len(raw_pal) // 3)
+        pal     = raw_pal[:n_cols * 3]
 
         # count pixels per palette entry so coverage drives the choice,
         # not just saturation (avoids small-area accent colours like logos winning)
-        counts = [0] * 8
+        counts = [0] * n_cols
         for p in q.getdata():
-            if p < 8:
+            if p < n_cols:
                 counts[p] += 1
         total = max(1, sum(counts))
 
         best_col, best_score = None, -1.0
-        for i in range(8):
+        for i in range(n_cols):
             r, g, b  = pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]
             _, s, v  = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
             if v < 0.15 or v > 0.95:   # skip near-black and near-white
@@ -743,7 +745,7 @@ class App:
                 else:
                     surf = None
             except Exception as e:
-                log.warning("Art load failed for %s: %s", uri, e)
+                log.exception("Art load failed for %s: %s", uri, e)
                 surf = None
             # Store in memory LRU cache
             self._art_mem[uri] = surf
