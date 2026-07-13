@@ -200,6 +200,7 @@ class MopidyPlayer:
     # ── internal: status poll ─────────────────────────────────────────────────
 
     def _poll_loop(self):
+        _prev_had_next = False   # True if the previous "play" tick had a nextsong
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -208,8 +209,26 @@ class MopidyPlayer:
                 continue
             try:
                 with self._ctrl_lock:
-                    self._status = self._ctrl.status()
-                    self._song   = self._ctrl.currentsong()
+                    status = self._ctrl.status()
+                    song   = self._ctrl.currentsong()
+                state = status.get("state", "")
+                if state == "play":
+                    _prev_had_next = "nextsong" in status
+                elif state == "stop" and _prev_had_next:
+                    # Stopped while there was still a next track — Spotify stream drop.
+                    log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
+                    _prev_had_next = False
+                    with self._ctrl_lock:
+                        try:
+                            self._ctrl.next()
+                            self._ctrl.play()
+                            status = self._ctrl.status()
+                            song   = self._ctrl.currentsong()
+                        except Exception as e:
+                            log.warning("auto-advance failed: %s", e)
+                with self._ctrl_lock:
+                    self._status = status
+                    self._song   = song
             except Exception as e:
                 log.warning("Poll error: %s", e)
                 self._ctrl_ok = False
