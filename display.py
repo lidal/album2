@@ -745,7 +745,7 @@ class App:
                 else:
                     surf = None
             except Exception as e:
-                log.exception("Art load failed for %s: %s", uri, e)
+                log.warning("Art load failed for %s: %s", uri, e)
                 surf = None
             # Store in memory LRU cache
             self._art_mem[uri] = surf
