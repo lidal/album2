@@ -226,18 +226,24 @@ class MopidyPlayer:
                 if state == "play":
                     _prev_had_next = "nextsong" in status
                     _stop_since    = 0.0
-                elif state == "stop":
-                    if time.monotonic() < self._queue_rebuild_until:
+                elif state in ("stop", "pause"):
+                    log.info("poll: state=%s  had_next=%s  qlen=%s  since=%.1f  "
+                             "active=%d  recovering=%s  rebuild=%.0f",
+                             state, _prev_had_next,
+                             status.get("playlistlength", "—"),
+                             time.monotonic() - _stop_since if _stop_since else 0.0,
+                             len(self._active_tracks),
+                             self._recovery_in_progress,
+                             max(0.0, self._queue_rebuild_until - time.monotonic()))
+                    if state != "stop":
+                        pass  # pause: don't touch _stop_since or advance
+                    elif time.monotonic() < self._queue_rebuild_until:
                         # Queue is being rebuilt — ignore stop state entirely.
                         _prev_had_next = False
                         _stop_since    = 0.0
                     elif _stop_since == 0.0:
                         _stop_since   = time.monotonic()
                         _stopped_song = dict(song)
-                        log.info("poll: state=stop  had_next=%s  nextsong_id=%s  qlen=%s",
-                                 _prev_had_next,
-                                 status.get("nextsongid", "—"),
-                                 status.get("playlistlength", "—"))
                     # Only act after a 1 s debounce — avoids firing during brief
                     # stop-states that occur when seeking or rebuilding the queue.
                     elif time.monotonic() - _stop_since > 1.0:
