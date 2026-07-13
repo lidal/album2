@@ -238,23 +238,26 @@ class MopidyPlayer:
                                  _prev_had_next,
                                  status.get("nextsongid", "—"),
                                  status.get("playlistlength", "—"))
-                    # Only auto-advance after 1 s — avoids firing during brief
-                    # stop-states that occur when clicking a track to seek.
-                    elif _prev_had_next and time.monotonic() - _stop_since > 1.0:
-                        _prev_had_next = False
-                        _stop_since    = 0.0
+                    # Only act after a 1 s debounce — avoids firing during brief
+                    # stop-states that occur when seeking or rebuilding the queue.
+                    elif time.monotonic() - _stop_since > 1.0:
                         qlen = int(status.get("playlistlength", "0") or "0")
                         if qlen == 0 and self._active_tracks and not self._recovery_in_progress:
                             # Mopidy-Spotify cleared the queue after a clicked track
-                            # ended (single-track context mode).  Reload from the
-                            # next track using individual URIs.
+                            # ended (single-track context mode).  _prev_had_next is
+                            # False because Spotify reports no nextsong in this mode,
+                            # so we trigger recovery on qlen=0 unconditionally.
+                            _prev_had_next = False
+                            _stop_since    = 0.0
                             log.warning("queue cleared after track end — recovering from next")
                             self._recovery_in_progress = True
                             _uri = _stopped_song.get("file", "")
                             threading.Thread(
                                 target=self._recover_next, args=(_uri,), daemon=True
                             ).start()
-                        elif qlen > 0:
+                        elif qlen > 0 and _prev_had_next:
+                            _prev_had_next = False
+                            _stop_since    = 0.0
                             log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
                             with self._ctrl_lock:
                                 try:
