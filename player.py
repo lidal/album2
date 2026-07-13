@@ -306,6 +306,13 @@ class MopidyPlayer:
             self._status["state"] = "stop"
             self._song = {}
 
+    def _reset_tracklist_options(self):
+        """Ensure single/repeat/random/consume are off before starting album playback."""
+        self._cmd("single", 0)
+        self._cmd("repeat", 0)
+        self._cmd("random", 0)
+        self._cmd("consume", 0)
+
     def next(self):
         self._cmd("next")
 
@@ -546,6 +553,7 @@ class MopidyPlayer:
         return sorted(result, key=_sort_key)
 
     def play_album_fast(self, album_uri: str) -> list[dict]:
+        self._reset_tracklist_options()
         """Add *album_uri* to tracklist and start playing immediately.
 
         Uses a single core.tracklist.add(uri=...) call which is faster than
@@ -594,6 +602,7 @@ class MopidyPlayer:
         """Replace queue with *tracks*, seek to *track_index*, and pause."""
         if not tracks:
             return
+        self._reset_tracklist_options()
         uris = [t["file"] for t in tracks if "file" in t]
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=uris) or []
@@ -611,6 +620,7 @@ class MopidyPlayer:
         """Replace queue with *tracks* and start playing from *track_index*."""
         if not tracks:
             return
+        self._reset_tracklist_options()
         uris = [t["file"] for t in tracks if "file" in t]
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=uris) or []
