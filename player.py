@@ -661,16 +661,30 @@ class MopidyPlayer:
         with self._ctrl_lock:
             self._status["state"] = "pause"
 
-    def play_album(self, tracks: list[dict], track_index: int = 0):
-        """Replace queue with *tracks* and start playing from *track_index*."""
+    def play_album(self, tracks: list[dict], track_index: int = 0, start_uri: str = ""):
+        """Replace queue with *tracks* and start playing from *track_index*.
+
+        If *start_uri* is given, find the matching track in tl_tracks by URI
+        (robust against tracks with missing URIs shifting the positional index).
+        """
         if not tracks:
             return
         self._reset_tracklist_options()
         uris = [t["file"] for t in tracks if "file" in t]
         self._rpc("core.tracklist.clear")
         tl_tracks = self._rpc("core.tracklist.add", uris=uris) or []
-        if tl_tracks and 0 <= track_index < len(tl_tracks):
-            self._rpc("core.playback.play", tlid=tl_tracks[track_index]["tlid"])
+        tlid = None
+        if start_uri:
+            for tlt in tl_tracks:
+                if isinstance(tlt, dict):
+                    t = (tlt.get("track") or {})
+                    if t.get("uri") == start_uri:
+                        tlid = tlt["tlid"]
+                        break
+        if tlid is None and tl_tracks and 0 <= track_index < len(tl_tracks):
+            tlid = tl_tracks[track_index]["tlid"]
+        if tlid is not None:
+            self._rpc("core.playback.play", tlid=tlid)
         with self._ctrl_lock:
             self._status["state"] = "play"
 

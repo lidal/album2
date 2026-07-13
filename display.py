@@ -3684,6 +3684,7 @@ class App:
                     threading.Thread(
                         target=self.player.play_album,
                         args=(tracks_snap, idx),
+                        kwargs={"start_uri": track.get("file", "")},
                         daemon=True,
                     ).start()
                     self._reset_elapsed()
