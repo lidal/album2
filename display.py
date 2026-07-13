@@ -406,6 +406,7 @@ class App:
         self._lyrics_scroll:   float = 0.0   # manual scroll offset (visual rows, no-timestamp mode)
         self._lyrics_drag:     bool  = False
         self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
+        self._prefetch_gen:    int   = 0    # incremented on each new album; cancels old prefetch
 
         # action flash feedback
         self._flash_icon:     str | None = None
@@ -1942,9 +1943,17 @@ class App:
         Runs in one background thread so API requests are serialised and we
         don't hammer lrclib.net with a burst of parallel calls.  Already-
         cached tracks are skipped, so re-opening the same album is instant.
+        Opening a new album increments _prefetch_gen which causes any
+        in-flight prefetch to stop after its current track finishes.
         """
+        self._prefetch_gen += 1
+        my_gen = self._prefetch_gen
+
         def _run():
             for track in tracks:
+                if self._prefetch_gen != my_gen:
+                    log.info("lyrics prefetch: cancelled (new album opened)")
+                    return
                 uri = track.get("file", "")
                 if not uri or uri in self._lyrics_cache:
                     continue
@@ -1958,7 +1967,7 @@ class App:
                     text   = self._load_lyrics_for_uri(uri, song=snap_song, status={})
                     parsed = self._parse_lyrics(text) if text else None
                 except Exception:
-                    log.exception("prefetch lyrics failed for %s", uri)
+                    log.exception("lyrics prefetch failed for %s", uri)
                     parsed = None
                 self._lyrics_cache[uri] = parsed
                 # If this track is currently playing, apply immediately.
