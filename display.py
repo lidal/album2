@@ -3010,25 +3010,29 @@ class App:
         return dx * dx + dy * dy <= (BTN_RADIUS + 10) ** 2
 
     def _build_audio_items(self) -> list[dict]:
-        sinks = self.audio.get_sinks() if (self.audio and self.audio.available) else []
-        items = [dict(s, bt_addr=None, bt_connected=True) for s in sinks]
+        # Use pactl sink names as IDs (works on both PipeWire and PulseAudio)
+        # so BT address matching is reliable — wpctl uses numeric IDs that can't
+        # be matched against the "bluez_output.XX_XX.1" PA name format.
+        sinks = self.audio.get_sinks_pa() if (self.audio and self.audio.available) else []
+        # Start with all PA sinks; we'll annotate BT ones and replace entries.
+        # Build a map: pa_name → item index for O(1) BT matching.
+        items: list[dict] = []
+        pa_name_to_idx: dict[str, int] = {}
+        for s in sinks:
+            pa_name_to_idx[s["id"]] = len(items)
+            items.append(dict(s, bt_addr=None, bt_connected=True))
+
         if self.bt and self.bt.available:
             for dev in self.bt.get_devices():
                 pa_name = (self.audio.bt_sink_pa_name(dev["address"])
                            if self.audio else "")
                 if pa_name:
-                    # BT device has an active audio sink — annotate the matching
-                    # entry in items (match by PA name substring in the sink id).
-                    matched = False
-                    for item in items:
-                        sid = item.get("id") or ""
-                        if pa_name in sid or sid in pa_name:
-                            item["bt_addr"] = dev["address"]
-                            matched = True
-                            break
-                    if not matched:
-                        # Sink exists in PA but not in our list (e.g. wpctl uses
-                        # numeric IDs): add it so the user can select it.
+                    idx = pa_name_to_idx.get(pa_name)
+                    if idx is not None:
+                        # Annotate the existing sink entry as BT.
+                        items[idx]["bt_addr"] = dev["address"]
+                        items[idx]["name"]    = dev["name"]
+                    else:
                         items.append({
                             "id":           pa_name,
                             "name":         dev["name"],
@@ -3355,9 +3359,8 @@ class App:
                                     break
                         if pa_name and self.audio and self.audio.available:
                             self.audio.set_sink_pa(pa_name)
-                        self._audio_sinks      = self._build_audio_items()
-                        self._audio_busy_id    = None
-                        self._audio_popup_open = False
+                        self._audio_sinks   = self._build_audio_items()
+                        self._audio_busy_id = None
                         self._dirty = True
                     threading.Thread(target=_switch, daemon=True).start()
                     return

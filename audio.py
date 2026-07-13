@@ -92,6 +92,11 @@ class AudioOutputManager:
                         sinks.append({"id": sid, "name": name, "active": active})
         return sinks
 
+    def get_sinks_pa(self) -> list[dict]:
+        """Return sinks via pactl — works on both PipeWire and PulseAudio.
+        IDs are PA sink names so BT address matching is reliable."""
+        return self._sinks_pactl()
+
     def _sinks_pactl(self) -> list[dict]:
         out  = _run("pactl", "list", "sinks")
         info = _run("pactl", "info")
