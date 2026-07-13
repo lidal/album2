@@ -86,6 +86,7 @@ def main():
             log.warning("Cannot open touch device: %s", exc)
 
     player  = MopidyPlayer()
+    player.stop()   # clear any leftover queue from the previous session
     volume  = VolumeSimulator() if VOLUME_SIMULATE else VolumeController()
     bt      = BluetoothManager()
     wifi    = WiFiManager()
