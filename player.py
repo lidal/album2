@@ -211,9 +211,10 @@ class MopidyPlayer:
 
     def _poll_loop(self):
         _prev_had_next  = False
-        _stop_since     = 0.0     # monotonic time when "stop" state first seen
-        _stopped_song: dict = {}  # last song seen in "play" state (currentsong is empty at stop)
+        _stop_since     = 0.0     # monotonic time when "stop/pause" state first seen
+        _stopped_song: dict = {}  # track URI captured when stop first detected
         _last_play_song: dict = {}
+        _prev_state     = ""
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -226,6 +227,12 @@ class MopidyPlayer:
                     song   = self._ctrl.currentsong()
                 state = status.get("state", "")
                 if state == "play":
+                    if _prev_state != "play":
+                        log.info("poll: → play  qlen=%s  single=%s  nextsong=%s  song=%s",
+                                 status.get("playlistlength", "—"),
+                                 status.get("single", "0"),
+                                 status.get("nextsong", "—"),
+                                 song.get("file", "—"))
                     _last_play_song = dict(song)
                     _prev_had_next  = "nextsong" in status
                     _stop_since     = 0.0
@@ -237,10 +244,15 @@ class MopidyPlayer:
                         self._cmd("single", 0)
                 elif state in ("stop", "pause"):
                     if state != "stop":
+                        # Capture song from pause state too — currentsong() is
+                        # populated during pause, unlike stop.
+                        if song.get("file"):
+                            _last_play_song = dict(song)
                         if _stop_since == 0.0:
-                            log.info("poll: state=pause  qlen=%s  song=%s",
+                            log.info("poll: → pause  qlen=%s  song=%s",
                                      status.get("playlistlength", "—"),
                                      song.get("file", "—"))
+                            _stop_since = time.monotonic()  # suppress subsequent polls
                     elif time.monotonic() < self._queue_rebuild_until:
                         # Queue is being rebuilt — ignore stop state entirely.
                         if _stop_since == 0.0:
@@ -251,11 +263,12 @@ class MopidyPlayer:
                     elif _stop_since == 0.0:
                         _stop_since   = time.monotonic()
                         # currentsong() is often empty at stop time; use the last
-                        # song we saw while state was "play" instead.
+                        # song we saw while state was "play" or "pause" instead.
                         _stopped_song = _last_play_song
-                        log.info("poll: state=stop  had_next=%s  qlen=%s  song=%s",
+                        log.info("poll: → stop  had_next=%s  qlen=%s  active=%d  song=%s",
                                  _prev_had_next,
                                  status.get("playlistlength", "—"),
+                                 len(self._active_tracks),
                                  _last_play_song.get("file", "—"))
                     # Only act after a 1 s debounce — avoids firing during brief
                     # stop-states that occur when seeking or rebuilding the queue.
@@ -270,11 +283,13 @@ class MopidyPlayer:
                             # ended (single-track context mode).  _prev_had_next is
                             # False because Spotify reports no nextsong in this mode,
                             # so we trigger recovery on qlen=0 unconditionally.
+                            _had = _prev_had_next
                             _prev_had_next = False
                             _stop_since    = 0.0
-                            log.warning("queue cleared after track end — recovering from next")
-                            self._recovery_in_progress = True
                             _uri = _stopped_song.get("file", "")
+                            log.warning("poll: qlen=0 after stop  had_next=%s  from=%s — recovering",
+                                        _had, _uri or "—")
+                            self._recovery_in_progress = True
                             threading.Thread(
                                 target=self._recover_next, args=(_uri,), daemon=True
                             ).start()
@@ -283,10 +298,11 @@ class MopidyPlayer:
                             # Happens when single=1 was set (nextsong absent, so
                             # _prev_had_next may be False).  Use MPD next+play to
                             # advance regardless.
+                            _had = _prev_had_next
                             _prev_had_next = False
                             _stop_since    = 0.0
-                            log.warning("playback stopped with qlen=%d had_next=%s — advancing",
-                                        qlen, _prev_had_next)
+                            log.warning("poll: qlen=%d  had_next=%s — forcing next+play",
+                                        qlen, _had)
                             with self._ctrl_lock:
                                 try:
                                     self._ctrl.next()
@@ -295,6 +311,7 @@ class MopidyPlayer:
                                     song   = self._ctrl.currentsong()
                                 except Exception as e:
                                     log.warning("auto-advance failed: %s", e)
+                _prev_state = state
                 with self._ctrl_lock:
                     self._status = status
                     self._song   = song
@@ -463,14 +480,17 @@ class MopidyPlayer:
                     "file":   track.get("file", ""),
                 }
         uri = track.get("file", "") if track else ""
+        log.info("play_track_in_queue: pos=%d  uri=%s", pos, uri or "—")
         def _play(uri=uri, pos=pos):
             if uri:
                 tl_tracks = self._rpc("core.tracklist.get_tl_tracks") or []
                 for tlt in tl_tracks:
                     t = (tlt.get("track") or {}) if isinstance(tlt, dict) else {}
                     if t.get("uri") == uri:
+                        log.info("play_track_in_queue: found tlid=%s", tlt["tlid"])
                         self._rpc("core.playback.play", tlid=tlt["tlid"])
                         return
+                log.warning("play_track_in_queue: uri not found in queue, falling back to pos=%d", pos)
             self._cmd("play", str(pos))
         threading.Thread(target=_play, daemon=True).start()
 
@@ -662,6 +682,7 @@ class MopidyPlayer:
         a separate library.lookup + N individual adds. Returns track dicts
         parsed from the response so the caller can populate the UI.
         """
+        log.info("play_album_fast: %s", album_uri)
         self._queue_rebuild_until = time.monotonic() + 30.0
         self._reset_tracklist_options()
         self._rpc("core.tracklist.clear")
@@ -692,9 +713,13 @@ class MopidyPlayer:
                 "duration": (t.get("length") or 0) // 1000,
             })
         if tl_tracks:
+            log.info("play_album_fast: loaded %d tracks, playing tlid=%s",
+                     len(tl_tracks), tl_tracks[0]["tlid"])
             self._rpc("core.playback.play", tlid=tl_tracks[0]["tlid"])
             with self._ctrl_lock:
                 self._status["state"] = "play"
+        else:
+            log.warning("play_album_fast: no tracks returned for %s", album_uri)
         self._queue_rebuild_until = 0.0
         def _sort_key(t):
             try:
@@ -777,6 +802,8 @@ class MopidyPlayer:
         """
         if not tracks:
             return
+        start = tracks[track_index].get("file", "—") if 0 <= track_index < len(tracks) else "—"
+        log.info("play_album: %d tracks  idx=%d  start=%s", len(tracks), track_index, start_uri or start)
         self._queue_rebuild_until = time.monotonic() + 30.0
         self._reset_tracklist_options()
         uris = [t["file"] for t in tracks if "file" in t]
