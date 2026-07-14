@@ -228,7 +228,10 @@ class MopidyPlayer:
                     _stop_since    = 0.0
                 elif state in ("stop", "pause"):
                     if state != "stop":
-                        pass  # pause: don't touch _stop_since or advance
+                        if _stop_since == 0.0:
+                            log.info("poll: state=pause  qlen=%s  song=%s",
+                                     status.get("playlistlength", "—"),
+                                     song.get("file", "—"))
                     elif time.monotonic() < self._queue_rebuild_until:
                         # Queue is being rebuilt — ignore stop state entirely.
                         _prev_had_next = False
@@ -236,10 +239,18 @@ class MopidyPlayer:
                     elif _stop_since == 0.0:
                         _stop_since   = time.monotonic()
                         _stopped_song = dict(song)
+                        log.info("poll: state=stop  had_next=%s  qlen=%s  song=%s",
+                                 _prev_had_next,
+                                 status.get("playlistlength", "—"),
+                                 song.get("file", "—"))
                     # Only act after a 1 s debounce — avoids firing during brief
                     # stop-states that occur when seeking or rebuilding the queue.
                     elif time.monotonic() - _stop_since > 1.0:
                         qlen = int(status.get("playlistlength", "0") or "0")
+                        log.info("poll: stop debounce expired  qlen=%d  had_next=%s  "
+                                 "active=%d  recovering=%s",
+                                 qlen, _prev_had_next,
+                                 len(self._active_tracks), self._recovery_in_progress)
                         if qlen == 0 and self._active_tracks and not self._recovery_in_progress:
                             # Mopidy-Spotify cleared the queue after a clicked track
                             # ended (single-track context mode).  _prev_had_next is
@@ -265,6 +276,8 @@ class MopidyPlayer:
                                     song   = self._ctrl.currentsong()
                                 except Exception as e:
                                     log.warning("auto-advance failed: %s", e)
+                        else:
+                            log.info("poll: stop debounce — no action taken")
                 with self._ctrl_lock:
                     self._status = status
                     self._song   = song
