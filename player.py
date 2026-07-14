@@ -211,7 +211,8 @@ class MopidyPlayer:
     def _poll_loop(self):
         _prev_had_next  = False
         _stop_since     = 0.0     # monotonic time when "stop" state first seen
-        _stopped_song: dict = {}  # song that was playing when stop was detected
+        _stopped_song: dict = {}  # last song seen in "play" state (currentsong is empty at stop)
+        _last_play_song: dict = {}
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -224,8 +225,15 @@ class MopidyPlayer:
                     song   = self._ctrl.currentsong()
                 state = status.get("state", "")
                 if state == "play":
-                    _prev_had_next = "nextsong" in status
-                    _stop_since    = 0.0
+                    _last_play_song = dict(song)
+                    _prev_had_next  = "nextsong" in status
+                    _stop_since     = 0.0
+                    # Mopidy-Spotify sets single=1 internally when
+                    # core.playback.play(tlid=X) is called, which hides nextsong
+                    # and disables auto-advance.  Reset it immediately.
+                    if status.get("single", "0") != "0":
+                        log.info("poll: detected single=1 during play — resetting")
+                        self._cmd("single", 0)
                 elif state in ("stop", "pause"):
                     if state != "stop":
                         if _stop_since == 0.0:
@@ -238,20 +246,22 @@ class MopidyPlayer:
                         _stop_since    = 0.0
                     elif _stop_since == 0.0:
                         _stop_since   = time.monotonic()
-                        _stopped_song = dict(song)
+                        # currentsong() is often empty at stop time; use the last
+                        # song we saw while state was "play" instead.
+                        _stopped_song = _last_play_song
                         log.info("poll: state=stop  had_next=%s  qlen=%s  song=%s",
                                  _prev_had_next,
                                  status.get("playlistlength", "—"),
-                                 song.get("file", "—"))
+                                 _last_play_song.get("file", "—"))
                     # Only act after a 1 s debounce — avoids firing during brief
                     # stop-states that occur when seeking or rebuilding the queue.
                     elif time.monotonic() - _stop_since > 1.0:
                         qlen = int(status.get("playlistlength", "0") or "0")
-                        log.info("poll: stop debounce expired  qlen=%d  had_next=%s  "
-                                 "active=%d  recovering=%s",
-                                 qlen, _prev_had_next,
-                                 len(self._active_tracks), self._recovery_in_progress)
-                        if qlen == 0 and self._active_tracks and not self._recovery_in_progress:
+                        if not self._active_tracks:
+                            # No album loaded — nothing to recover; silence the spam
+                            # by resetting the debounce timer.
+                            _stop_since = 0.0
+                        elif qlen == 0 and not self._recovery_in_progress:
                             # Mopidy-Spotify cleared the queue after a clicked track
                             # ended (single-track context mode).  _prev_had_next is
                             # False because Spotify reports no nextsong in this mode,
@@ -264,10 +274,15 @@ class MopidyPlayer:
                             threading.Thread(
                                 target=self._recover_next, args=(_uri,), daemon=True
                             ).start()
-                        elif qlen > 0 and _prev_had_next:
+                        elif qlen > 0:
+                            # Queue intact — Mopidy stopped without advancing.
+                            # Happens when single=1 was set (nextsong absent, so
+                            # _prev_had_next may be False).  Use MPD next+play to
+                            # advance regardless.
                             _prev_had_next = False
                             _stop_since    = 0.0
-                            log.warning("playback stopped mid-queue (stream drop?), auto-advancing")
+                            log.warning("playback stopped with qlen=%d had_next=%s — advancing",
+                                        qlen, _prev_had_next)
                             with self._ctrl_lock:
                                 try:
                                     self._ctrl.next()
@@ -276,8 +291,6 @@ class MopidyPlayer:
                                     song   = self._ctrl.currentsong()
                                 except Exception as e:
                                     log.warning("auto-advance failed: %s", e)
-                        else:
-                            log.info("poll: stop debounce — no action taken")
                 with self._ctrl_lock:
                     self._status = status
                     self._song   = song
