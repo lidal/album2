@@ -1912,9 +1912,6 @@ class App:
             )
         except Exception:
             self._lyrics_disk_count = 0
-        total = settings.get("lyrics_total_tracks") or 0
-        if total > 0 and self._lyrics_disk_count >= total:
-            self._lyrics_bulk_done = True
         self._dirty = True
 
     # ── draw: settings ────────────────────────────────────────────────────────
