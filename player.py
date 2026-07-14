@@ -210,11 +210,12 @@ class MopidyPlayer:
     # ── internal: status poll ─────────────────────────────────────────────────
 
     def _poll_loop(self):
-        _prev_had_next  = False
-        _stop_since     = 0.0     # monotonic time when "stop/pause" state first seen
+        _prev_had_next    = False
+        _stop_since       = 0.0   # monotonic time when "stop/pause" state first seen
+        _stop_from_play   = False  # True when the stop followed an actual play
         _stopped_song: dict = {}  # track URI captured when stop first detected
         _last_play_song: dict = {}
-        _prev_state     = ""
+        _prev_state       = ""
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -227,12 +228,20 @@ class MopidyPlayer:
                     song   = self._ctrl.currentsong()
                 state = status.get("state", "")
                 if state == "play":
+                    cur_file = song.get("file", "")
                     if _prev_state != "play":
                         log.info("poll: → play  qlen=%s  single=%s  nextsong=%s  song=%s",
                                  status.get("playlistlength", "—"),
                                  status.get("single", "0"),
                                  status.get("nextsong", "—"),
-                                 song.get("file", "—"))
+                                 cur_file or "—")
+                    elif cur_file and cur_file != _last_play_song.get("file", ""):
+                        # Song changed mid-play (natural track advance — no stop state).
+                        log.info("poll: song→  qlen=%s  single=%s  nextsong=%s  song=%s",
+                                 status.get("playlistlength", "—"),
+                                 status.get("single", "0"),
+                                 status.get("nextsong", "—"),
+                                 cur_file)
                     _last_play_song = dict(song)
                     _prev_had_next  = "nextsong" in status
                     _stop_since     = 0.0
@@ -261,12 +270,14 @@ class MopidyPlayer:
                         _prev_had_next = False
                         _stop_since    = 0.0
                     elif _stop_since == 0.0:
-                        _stop_since   = time.monotonic()
+                        _stop_since     = time.monotonic()
+                        _stop_from_play = (_prev_state == "play")
                         # currentsong() is often empty at stop time; use the last
                         # song we saw while state was "play" or "pause" instead.
                         _stopped_song = _last_play_song
-                        log.info("poll: → stop  had_next=%s  qlen=%s  active=%d  song=%s",
+                        log.info("poll: → stop  had_next=%s  from_play=%s  qlen=%s  active=%d  song=%s",
                                  _prev_had_next,
+                                 _stop_from_play,
                                  status.get("playlistlength", "—"),
                                  len(self._active_tracks),
                                  _last_play_song.get("file", "—"))
@@ -277,6 +288,12 @@ class MopidyPlayer:
                         if not self._active_tracks:
                             # No album loaded — nothing to recover; silence the spam
                             # by resetting the debounce timer.
+                            _stop_since = 0.0
+                        elif not _stop_from_play:
+                            # Stop came from a non-play state (e.g. Spotify streaming
+                            # startup after play_album_fast).  Don't advance yet —
+                            # wait for the track to actually start playing first.
+                            log.info("poll: stop not from play (startup?) — waiting  qlen=%d", qlen)
                             _stop_since = 0.0
                         elif qlen == 0 and not self._recovery_in_progress:
                             # Mopidy-Spotify cleared the queue after a clicked track
