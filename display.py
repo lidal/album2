@@ -363,6 +363,8 @@ class App:
         # cache clear feedback
         self._cache_cleared_ms: int = 0   # ticks when last cleared (0 = not recently)
         self._instrumental_cleared_ms: int = 0
+        self._lyrics_disk_count: int = -1  # -1 = not yet computed
+        self._refresh_lyrics_disk_count()
 
         # audio output popup
         self._audio_popup_open: bool = False
@@ -1901,6 +1903,18 @@ class App:
         self._lyrics_cache = {k: v for k, v in self._lyrics_cache.items() if v is not None}
         log.info("clear instrumental: removed %d sentinel files", count)
         self._instrumental_cleared_ms = pygame.time.get_ticks()
+        self._refresh_lyrics_disk_count()
+
+    def _refresh_lyrics_disk_count(self):
+        try:
+            self._lyrics_disk_count = sum(
+                1 for f in os.listdir(_LYRICS_CACHE_DIR) if f.endswith(".lrc")
+            )
+        except Exception:
+            self._lyrics_disk_count = 0
+        total = settings.get("lyrics_total_tracks") or 0
+        if total > 0 and self._lyrics_disk_count >= total:
+            self._lyrics_bulk_done = True
         self._dirty = True
 
     # ── draw: settings ────────────────────────────────────────────────────────
@@ -2019,6 +2033,7 @@ class App:
         def _run():
             albums = list(self._albums)
             total  = len(albums)
+            total_tracks = 0
             for i, album in enumerate(albums):
                 if self._lyrics_bulk_progress is None:
                     return   # cancelled
@@ -2032,6 +2047,7 @@ class App:
                     except Exception:
                         log.exception("bulk lyrics: failed loading %s", album.get("name"))
                         tracks = []
+                total_tracks += len(tracks)
                 for track in tracks:
                     uri = track.get("file", "")
                     if uri and uri not in self._lyrics_cache:
@@ -2049,10 +2065,11 @@ class App:
                             parsed = None
                         self._lyrics_cache[uri] = parsed
 
+            settings.set("lyrics_total_tracks", total_tracks)
             self._lyrics_bulk_progress = None
             self._lyrics_bulk_done     = True
-            self._dirty = True
-            log.info("bulk lyrics: done — %d albums processed", total)
+            self._refresh_lyrics_disk_count()
+            log.info("bulk lyrics: done — %d albums, %d tracks", total, total_tracks)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2669,9 +2686,15 @@ class App:
                     self.screen.blit(stop_s, (W - BTN_MARGIN - stop_s.get_width(),
                                               y + (TRACK_ROW_H - stop_s.get_height()) // 2))
                 elif not self._lyrics_bulk_done:
-                    warn = _render_text(self._f_track_sm, "may be slow", COL_TEXT_ALBUM)
-                    self.screen.blit(warn, (W - BTN_MARGIN - warn.get_width(),
-                                            y + (TRACK_ROW_H - warn.get_height()) // 2))
+                    disk  = self._lyrics_disk_count
+                    known = settings.get("lyrics_total_tracks") or 0
+                    if disk >= 0:
+                        sub = f"{disk} / {known} cached" if known > 0 else f"{disk} cached"
+                    else:
+                        sub = "may be slow"
+                    sub_s = _render_text(self._f_track_sm, sub, COL_TEXT_ALBUM)
+                    self.screen.blit(sub_s, (W - BTN_MARGIN - sub_s.get_width(),
+                                             y + (TRACK_ROW_H - sub_s.get_height()) // 2))
             else:
                 sl = _render_text(self._f_track, label, COL_TRACK_NORMAL)
                 self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
