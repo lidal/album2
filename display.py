@@ -364,7 +364,6 @@ class App:
         self._cache_cleared_ms: int = 0   # ticks when last cleared (0 = not recently)
         self._instrumental_cleared_ms: int = 0
         self._lyrics_disk_count: int = -1  # -1 = not yet computed
-        self._refresh_lyrics_disk_count()
 
         # audio output popup
         self._audio_popup_open: bool = False
@@ -517,6 +516,7 @@ class App:
         self._thumbs_pending: int      = 0   # number of thumbs still in flight
 
         threading.Thread(target=self._load_albums, args=(self._load_gen,), daemon=True).start()
+        self._refresh_lyrics_disk_count()
 
     # ── default background ────────────────────────────────────────────────────
 
