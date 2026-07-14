@@ -201,6 +201,7 @@ class MopidyPlayer:
         # recovery path when Mopidy-Spotify clears the queue (qlen=0) after a
         # clicked track ends.
         self._active_tracks: list[dict] = []
+        self._active_album_uri: str = ""   # set by play_album_fast for fast recovery
         self._recovery_in_progress: bool = False
 
         t = threading.Thread(target=self._poll_loop, daemon=True)
@@ -242,6 +243,9 @@ class MopidyPlayer:
                                      song.get("file", "—"))
                     elif time.monotonic() < self._queue_rebuild_until:
                         # Queue is being rebuilt — ignore stop state entirely.
+                        if _stop_since == 0.0:
+                            log.info("poll: state=stop  suppressed (rebuild)  qlen=%s",
+                                     status.get("playlistlength", "—"))
                         _prev_had_next = False
                         _stop_since    = 0.0
                     elif _stop_since == 0.0:
@@ -698,15 +702,16 @@ class MopidyPlayer:
             except (ValueError, TypeError):
                 return (1, 0)
         sorted_tracks = sorted(tracks, key=_sort_key)
-        self._active_tracks = sorted_tracks
+        self._active_tracks    = sorted_tracks
+        self._active_album_uri = album_uri
         return sorted_tracks
 
     def _recover_next(self, from_uri: str):
-        """Reload the queue with individual track URIs and play from the track
-        after *from_uri*.  Called when Mopidy-Spotify clears the queue (qlen=0)
-        after a specific-track play (single-track context mode)."""
+        """Reload the queue and play the track after *from_uri*.
+        Uses the album URI (fast) when available, individual URIs otherwise."""
         try:
-            tracks = self._active_tracks
+            tracks    = self._active_tracks
+            album_uri = self._active_album_uri
             idx = next((i for i, t in enumerate(tracks) if t.get("file") == from_uri), -1)
             if idx < 0:
                 log.warning("recover_next: %r not found in active tracks", from_uri)
@@ -715,8 +720,32 @@ class MopidyPlayer:
             if next_idx >= len(tracks):
                 log.info("recover_next: %r was last track", from_uri)
                 return
-            log.info("recover_next: reloading from track %d/%d", next_idx + 1, len(tracks))
-            self.play_album(tracks, next_idx, start_uri=tracks[next_idx].get("file", ""))
+            next_uri = tracks[next_idx].get("file", "")
+            log.info("recover_next: reloading from track %d/%d uri=%s",
+                     next_idx + 1, len(tracks), next_uri)
+            if album_uri:
+                # Fast path: single add for the whole album (~1-2s vs ~12s for individual URIs)
+                self._queue_rebuild_until = time.monotonic() + 10.0
+                self._reset_tracklist_options()
+                self._rpc("core.tracklist.clear")
+                tl_tracks = self._rpc("core.tracklist.add", uris=[album_uri]) or []
+                tlid = None
+                for tlt in tl_tracks:
+                    t = tlt.get("track", {}) if isinstance(tlt, dict) else {}
+                    if t.get("uri") == next_uri:
+                        tlid = tlt["tlid"]
+                        break
+                if tlid is None and tl_tracks:
+                    log.warning("recover_next_fast: %r not found by URI, using index", next_uri)
+                    tlid = tl_tracks[min(next_idx, len(tl_tracks) - 1)]["tlid"]
+                if tlid is not None:
+                    self._rpc("core.playback.play", tlid=tlid)
+                self._queue_rebuild_until = 0.0
+                self._active_tracks       = tracks   # keep existing sorted list
+                with self._ctrl_lock:
+                    self._status["state"] = "play"
+            else:
+                self.play_album(tracks, next_idx, start_uri=next_uri)
         except Exception as e:
             log.warning("recover_next failed: %s", e)
         finally:
@@ -766,7 +795,8 @@ class MopidyPlayer:
         if tlid is not None:
             self._rpc("core.playback.play", tlid=tlid)
         self._queue_rebuild_until = 0.0
-        self._active_tracks = list(tracks)
+        self._active_tracks    = list(tracks)
+        self._active_album_uri = ""   # individual-URI path — no album URI available
         with self._ctrl_lock:
             self._status["state"] = "play"
 
