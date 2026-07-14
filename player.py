@@ -325,15 +325,13 @@ class MopidyPlayer:
                     elif time.monotonic() - _stop_since > 1.0:
                         qlen = int(status.get("playlistlength", "0") or "0")
                         if not self._active_tracks:
-                            # No album loaded — nothing to recover; silence the spam
-                            # by resetting the debounce timer.
-                            _stop_since = 0.0
+                            pass   # no album loaded — nothing to do; keep _stop_since set so this branch stays silent
                         elif not _stop_from_play:
                             # Stop came from a non-play state (e.g. Spotify streaming
                             # startup after play_album_fast).  Don't advance yet —
                             # wait for the track to actually start playing first.
                             log.info("poll: stop not from play (startup?) — waiting  qlen=%d", qlen)
-                            _stop_since = 0.0
+                            # leave _stop_since set so this only logs once
                         elif qlen == 0 and not self._recovery_in_progress:
                             # Mopidy-Spotify cleared the queue after a clicked track
                             # ended (single-track context mode).  _prev_had_next is
