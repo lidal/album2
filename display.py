@@ -38,6 +38,7 @@ import bisect
 import collections
 import concurrent.futures
 import hashlib
+import json
 import logging
 import math
 import os
@@ -76,7 +77,8 @@ from config import (
 
 log = logging.getLogger(__name__)
 
-_LYRICS_CACHE_DIR = os.path.expanduser("~/.cache/album2/lyrics")
+_LYRICS_CACHE_DIR  = os.path.expanduser("~/.cache/album2/lyrics")
+_LYRICS_INDEX_PATH = os.path.expanduser("~/.cache/album2/lyrics_index.json")
 
 _LRC_TS_RE = re.compile(r'^\[(\d+):(\d+(?:\.\d+)?)\]')   # capture mm:ss.xx
 _LRC_META_RE = re.compile(r'^\[\w+:[^\]]*\]')             # metadata like [ti:...]
@@ -363,7 +365,7 @@ class App:
         # cache clear feedback
         self._cache_cleared_ms: int = 0   # ticks when last cleared (0 = not recently)
         self._instrumental_cleared_ms: int = 0
-        self._lyrics_disk_count: int = -1  # -1 = not yet computed
+        self._lyrics_album_index: set[str] = self._load_lyrics_index()
 
         # audio output popup
         self._audio_popup_open: bool = False
@@ -413,7 +415,6 @@ class App:
         self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
         self._prefetch_gen:    int   = 0    # incremented on each new album; cancels old prefetch
         self._lyrics_bulk_progress: tuple | None = None  # (done, total) while running
-        self._lyrics_bulk_done:     bool = False
         self._lyrics_anim_vis:   float = 0.0  # animated scroll position (visual rows)
         self._lyrics_target_vis: float = 0.0  # target scroll position
         self._lyrics_prev_idx:   int   = -1   # last known logical line index
@@ -516,7 +517,6 @@ class App:
         self._thumbs_pending: int      = 0   # number of thumbs still in flight
 
         threading.Thread(target=self._load_albums, args=(self._load_gen,), daemon=True).start()
-        self._refresh_lyrics_disk_count()
 
     # ── default background ────────────────────────────────────────────────────
 
@@ -1901,18 +1901,27 @@ class App:
             log.warning("clear instrumental: %s", e)
         # also clear session cache entries that resolved to None (no lyrics)
         self._lyrics_cache = {k: v for k, v in self._lyrics_cache.items() if v is not None}
+        # clear album index so the counter reflects the removed sentinels
+        self._lyrics_album_index.clear()
+        self._save_lyrics_index()
         log.info("clear instrumental: removed %d sentinel files", count)
         self._instrumental_cleared_ms = pygame.time.get_ticks()
-        self._refresh_lyrics_disk_count()
-
-    def _refresh_lyrics_disk_count(self):
-        try:
-            self._lyrics_disk_count = sum(
-                1 for f in os.listdir(_LYRICS_CACHE_DIR) if f.endswith(".lrc")
-            )
-        except Exception:
-            self._lyrics_disk_count = 0
         self._dirty = True
+
+    def _load_lyrics_index(self) -> set[str]:
+        try:
+            with open(_LYRICS_INDEX_PATH) as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+
+    def _save_lyrics_index(self):
+        try:
+            os.makedirs(os.path.dirname(_LYRICS_INDEX_PATH), exist_ok=True)
+            with open(_LYRICS_INDEX_PATH, "w") as f:
+                json.dump(list(self._lyrics_album_index), f)
+        except Exception as e:
+            log.warning("lyrics index save: %s", e)
 
     # ── draw: settings ────────────────────────────────────────────────────────
 
@@ -2024,16 +2033,14 @@ class App:
     def _start_lyrics_bulk_cache(self):
         """Fetch and cache lyrics for every track in the entire library."""
         self._lyrics_bulk_progress = (0, 0)
-        self._lyrics_bulk_done     = False
         self._dirty = True
 
         def _run():
             albums = list(self._albums)
             total  = len(albums)
-            total_tracks = 0
             for i, album in enumerate(albums):
                 if self._lyrics_bulk_progress is None:
-                    return   # cancelled
+                    return   # cancelled — don't mark this album as complete
                 self._lyrics_bulk_progress = (i, total)
                 self._dirty = True
                 tracks = album.get("tracks") or []
@@ -2044,8 +2051,9 @@ class App:
                     except Exception:
                         log.exception("bulk lyrics: failed loading %s", album.get("name"))
                         tracks = []
-                total_tracks += len(tracks)
                 for track in tracks:
+                    if self._lyrics_bulk_progress is None:
+                        return   # cancelled mid-album
                     uri = track.get("file", "")
                     if uri and uri not in self._lyrics_cache:
                         snap = {
@@ -2061,11 +2069,16 @@ class App:
                             log.exception("bulk lyrics: failed for %s", uri)
                             parsed = None
                         self._lyrics_cache[uri] = parsed
+                # album fully processed — mark it in the index
+                album_uri = album.get("track_uri", "")
+                if album_uri:
+                    self._lyrics_album_index.add(album_uri)
+                    self._save_lyrics_index()
+                    self._dirty = True
 
             self._lyrics_bulk_progress = None
-            self._lyrics_bulk_done     = True
-            self._refresh_lyrics_disk_count()
-            log.info("bulk lyrics: done — %d albums, %d tracks", total, total_tracks)
+            self._dirty = True
+            log.info("bulk lyrics: done — %d albums", total)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2660,12 +2673,16 @@ class App:
                     dp_y    = y + TRACK_ROW_H
                     deferred_dropdown = (dp_x, dp_y, dp_w, opts, cur_low)
             elif key == "lyrics_cache_all":
-                bulk = self._lyrics_bulk_progress
+                bulk      = self._lyrics_bulk_progress
+                cached_n  = sum(1 for a in self._albums
+                                if a.get("track_uri", "") in self._lyrics_album_index)
+                total_n   = len(self._albums)
+                all_done  = total_n > 0 and cached_n >= total_n
                 if bulk is not None:
                     done, total = bulk
                     lbl = f"Caching lyrics… {done}/{total}"
                     lbl_col = COL_TRACK_NUM
-                elif self._lyrics_bulk_done:
+                elif all_done:
                     lbl = "All lyrics cached"
                     lbl_col = COL_TEXT_ALBUM
                 else:
@@ -2681,12 +2698,8 @@ class App:
                     stop_s = _render_text(self._f_track_sm, "Stop", COL_HIGHLIGHT)
                     self.screen.blit(stop_s, (W - BTN_MARGIN - stop_s.get_width(),
                                               y + (TRACK_ROW_H - stop_s.get_height()) // 2))
-                elif not self._lyrics_bulk_done:
-                    disk  = self._lyrics_disk_count
-                    if disk >= 0:
-                        sub = f"{disk} cached"
-                    else:
-                        sub = "may be slow"
+                elif not all_done:
+                    sub   = f"{cached_n} / {total_n} albums" if total_n > 0 else "may be slow"
                     sub_s = _render_text(self._f_track_sm, sub, COL_TEXT_ALBUM)
                     self.screen.blit(sub_s, (W - BTN_MARGIN - sub_s.get_width(),
                                              y + (TRACK_ROW_H - sub_s.get_height()) // 2))
@@ -3535,7 +3548,6 @@ class App:
                     if self._lyrics_bulk_progress is not None:
                         self._lyrics_bulk_progress = None  # signals thread to stop
                     else:
-                        self._lyrics_bulk_done = False
                         self._start_lyrics_bulk_cache()
                     self._dirty = True
                 else:
