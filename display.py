@@ -2098,11 +2098,17 @@ class App:
                 log.warning("lyrics: embedded load error: %s", e)
 
         # 2. disk-cached .lrc file (sidecar for local, cache dir for Spotify)
+        #    An empty file is a sentinel meaning "instrumental / no lyrics" —
+        #    written below after all sources are exhausted.
         if lrc_path and os.path.exists(lrc_path):
             try:
                 with open(lrc_path, encoding="utf-8", errors="replace") as fh:
-                    log.info("lyrics: found cached .lrc at %s", lrc_path)
-                    return fh.read()
+                    content = fh.read()
+                if not content:
+                    log.info("lyrics: instrumental sentinel at %s — skipping lookups", lrc_path)
+                    return ""
+                log.info("lyrics: found cached .lrc at %s", lrc_path)
+                return content
             except Exception as e:
                 log.warning("lyrics: lrc read error: %s", e)
 
@@ -2153,7 +2159,10 @@ class App:
                                     break
                 if lrclib_data is not None:
                     if lrclib_data.get("instrumental"):
-                        log.info("lyrics: lrclib.net says instrumental, skipping")
+                        log.info("lyrics: lrclib.net says instrumental — writing sentinel")
+                        if lrc_path:
+                            self._save_lrc(lrc_path, "")
+                        return ""
                     else:
                         synced = (lrclib_data.get("syncedLyrics") or "").strip()
                         if synced:
@@ -2198,7 +2207,9 @@ class App:
             except Exception as e:
                 log.warning("lyrics: lyrics.ovh fetch failed: %s", e)
 
-        log.info("lyrics: all sources exhausted, no lyrics found")
+        log.info("lyrics: all sources exhausted, no lyrics found — writing instrumental sentinel")
+        if lrc_path:
+            self._save_lrc(lrc_path, "")
         return None
 
     def _parse_lyrics(self, text: str) -> tuple:
