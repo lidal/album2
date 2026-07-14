@@ -362,6 +362,7 @@ class App:
 
         # cache clear feedback
         self._cache_cleared_ms: int = 0   # ticks when last cleared (0 = not recently)
+        self._instrumental_cleared_ms: int = 0
 
         # audio output popup
         self._audio_popup_open: bool = False
@@ -856,6 +857,8 @@ class App:
                 or self._thumbs_pending > 0
                 or (self._cache_cleared_ms
                     and now_ms - self._cache_cleared_ms < 2000)
+                or (self._instrumental_cleared_ms
+                    and now_ms - self._instrumental_cleared_ms < 2000)
                 or abs(self._carousel_pos - self._carousel_pos_t) > 0.01
             )
 
@@ -1880,6 +1883,26 @@ class App:
         self._cache_cleared_ms = pygame.time.get_ticks()
         self._dirty = True
 
+    def _clear_instrumental_sentinels(self):
+        count = 0
+        try:
+            for fname in os.listdir(_LYRICS_CACHE_DIR):
+                if fname.endswith(".lrc"):
+                    fpath = os.path.join(_LYRICS_CACHE_DIR, fname)
+                    try:
+                        if os.path.getsize(fpath) == 0:
+                            os.remove(fpath)
+                            count += 1
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning("clear instrumental: %s", e)
+        # also clear session cache entries that resolved to None (no lyrics)
+        self._lyrics_cache = {k: v for k, v in self._lyrics_cache.items() if v is not None}
+        log.info("clear instrumental: removed %d sentinel files", count)
+        self._instrumental_cleared_ms = pygame.time.get_ticks()
+        self._dirty = True
+
     # ── draw: settings ────────────────────────────────────────────────────────
 
     def _show_flash(self, icon: str):
@@ -2355,6 +2378,7 @@ class App:
             or self._settings_scan_btn_at(pos)
             or self._wifi_network_at(pos)
             or self._settings_clear_cache_btn_at(pos)
+            or self._settings_clear_instrumental_btn_at(pos)
             or self._settings_debug_btn_at(pos)
             or self._settings_calibrate_btn_at(pos)
             or self._settings_reset_cal_btn_at(pos)
@@ -2405,7 +2429,7 @@ class App:
             circle(bx, by, BTN_RADIUS + 10)
             bt_rows   = self._bt_row_count()
             wifi_rows = self._wifi_row_count()
-            total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9
+            total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 10
             for i in range(total_rows):
                 probe = (W // 2, self._settings_row_y(i) + TRACK_ROW_H // 2)
                 if self._any_settings_row_hit(probe):
@@ -2584,7 +2608,7 @@ class App:
         # compute total content height from row count (independent of scroll)
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9   # SYSTEM(hdr+cache+debug) + TOUCH(hdr+cal+reset) + POWER(hdr+restart+shutdown)
+        total_rows = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 10  # SYSTEM(hdr+cache+instrumental+debug) + TOUCH(hdr+cal+reset) + POWER(hdr+restart+shutdown)
         content_h  = total_rows * TRACK_ROW_H + BTN_MARGIN * 2
         max_scroll  = max(0.0, float(content_h - clip_h))
         self._settings_scroll = max(0.0, min(self._settings_scroll, max_scroll))
@@ -2744,6 +2768,14 @@ class App:
         cc_col   = COL_TEXT_ALBUM if recently_cleared else COL_HIGHLIGHT
         cc = _render_text(self._f_track, cc_label, cc_col)
         self.screen.blit(cc, (BTN_MARGIN, y + (TRACK_ROW_H - cc.get_height()) // 2))
+        pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
+        y += TRACK_ROW_H
+
+        recently_instr = self._instrumental_cleared_ms and now_ms - self._instrumental_cleared_ms < 2000
+        instr_label = "Instrumental tags cleared" if recently_instr else "Clear instrumental tags"
+        instr_col   = COL_TEXT_ALBUM if recently_instr else COL_HIGHLIGHT
+        instr_s = _render_text(self._f_track, instr_label, instr_col)
+        self.screen.blit(instr_s, (BTN_MARGIN, y + (TRACK_ROW_H - instr_s.get_height()) // 2))
         pygame.draw.line(self.screen, COL_SEP, (0, y + TRACK_ROW_H - 1), (W, y + TRACK_ROW_H - 1))
         y += TRACK_ROW_H
 
@@ -2992,34 +3024,40 @@ class App:
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 1   # +0 = SYSTEM header
         return self._settings_row_hit(pos, row)
 
-    def _settings_debug_btn_at(self, pos) -> bool:
+    def _settings_clear_instrumental_btn_at(self, pos) -> bool:
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
         row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 2
         return self._settings_row_hit(pos, row)
 
+    def _settings_debug_btn_at(self, pos) -> bool:
+        bt_rows   = self._bt_row_count()
+        wifi_rows = self._wifi_row_count()
+        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 3
+        return self._settings_row_hit(pos, row)
+
     def _settings_calibrate_btn_at(self, pos) -> bool:
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 4   # +3 = TOUCH header
+        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 5   # +4 = TOUCH header
         return self._settings_row_hit(pos, row)
 
     def _settings_reset_cal_btn_at(self, pos) -> bool:
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 5
+        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 6
         return self._settings_row_hit(pos, row)
 
     def _settings_restart_btn_at(self, pos) -> bool:
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 7   # +6 = POWER header
+        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 8   # +7 = POWER header
         return self._settings_row_hit(pos, row)
 
     def _settings_shutdown_btn_at(self, pos) -> bool:
         bt_rows   = self._bt_row_count()
         wifi_rows = self._wifi_row_count()
-        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 8
+        row = len(_SETTINGS_ITEMS) + bt_rows + wifi_rows + 9
         return self._settings_row_hit(pos, row)
 
     def _scan_device_at(self, pos) -> dict | None:
@@ -3556,6 +3594,9 @@ class App:
                 return
             if self._settings_clear_cache_btn_at(pos):
                 self._clear_thumb_cache()
+                return
+            if self._settings_clear_instrumental_btn_at(pos):
+                self._clear_instrumental_sentinels()
                 return
             if self._settings_debug_btn_at(pos):
                 settings.toggle("debug")
