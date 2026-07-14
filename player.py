@@ -216,6 +216,8 @@ class MopidyPlayer:
         _stopped_song: dict = {}  # track URI captured when stop first detected
         _last_play_song: dict = {}
         _prev_state       = ""
+        _near_end_since   = 0.0   # when elapsed first reached near-duration
+        _near_end_uri     = ""    # song URI at that point
         while True:
             if not self._ctrl_ok:
                 time.sleep(3)
@@ -229,19 +231,27 @@ class MopidyPlayer:
                 state = status.get("state", "")
                 if state == "play":
                     cur_file = song.get("file", "")
+                    elapsed  = float(status.get("elapsed",  "0") or "0")
+                    duration = float(status.get("duration", "0") or "0")
                     if _prev_state != "play":
-                        log.info("poll: → play  qlen=%s  single=%s  nextsong=%s  song=%s",
+                        log.info("poll: → play  qlen=%s  single=%s  nextsong=%s  elapsed=%.1f/%.1f  song=%s",
                                  status.get("playlistlength", "—"),
                                  status.get("single", "0"),
                                  status.get("nextsong", "—"),
+                                 elapsed, duration,
                                  cur_file or "—")
+                        _near_end_since = 0.0
+                        _near_end_uri   = ""
                     elif cur_file and cur_file != _last_play_song.get("file", ""):
                         # Song changed mid-play (natural track advance — no stop state).
-                        log.info("poll: song→  qlen=%s  single=%s  nextsong=%s  song=%s",
+                        log.info("poll: song→  qlen=%s  single=%s  nextsong=%s  elapsed=%.1f/%.1f  song=%s",
                                  status.get("playlistlength", "—"),
                                  status.get("single", "0"),
                                  status.get("nextsong", "—"),
+                                 elapsed, duration,
                                  cur_file)
+                        _near_end_since = 0.0
+                        _near_end_uri   = ""
                     _last_play_song = dict(song)
                     _prev_had_next  = "nextsong" in status
                     _stop_since     = 0.0
@@ -251,7 +261,36 @@ class MopidyPlayer:
                     if status.get("single", "0") != "0":
                         log.info("poll: detected single=1 during play — resetting")
                         self._cmd("single", 0)
+                    # Detect stuck-at-end: Mopidy-Spotify sometimes stays in "play"
+                    # state after the GStreamer pipeline signals EOS, so elapsed
+                    # freezes at duration without a state transition.
+                    if duration > 5.0 and cur_file and elapsed >= duration - 1.5:
+                        if _near_end_uri != cur_file:
+                            _near_end_since = time.monotonic()
+                            _near_end_uri   = cur_file
+                            log.info("poll: near end  elapsed=%.1f/%.1f  song=%s",
+                                     elapsed, duration, cur_file[-22:])
+                        elif time.monotonic() - _near_end_since > 4.0:
+                            # Same track, still "playing" 4 s after near-end — stuck.
+                            log.warning("poll: stuck at end  elapsed=%.1f/%.1f  song=%s — forcing next",
+                                        elapsed, duration, cur_file[-22:])
+                            _near_end_since = 0.0
+                            _near_end_uri   = ""
+                            with self._ctrl_lock:
+                                try:
+                                    self._ctrl.next()
+                                    self._ctrl.play()
+                                    status = self._ctrl.status()
+                                    song   = self._ctrl.currentsong()
+                                except Exception as e:
+                                    log.warning("stuck-advance failed: %s", e)
+                    else:
+                        if _near_end_uri == cur_file and elapsed < duration - 5.0:
+                            _near_end_since = 0.0
+                            _near_end_uri   = ""
                 elif state in ("stop", "pause"):
+                    _near_end_since = 0.0
+                    _near_end_uri   = ""
                     if state != "stop":
                         # Capture song from pause state too — currentsong() is
                         # populated during pause, unlike stop.
