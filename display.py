@@ -2062,7 +2062,6 @@ class App:
                             parsed = None
                         self._lyrics_cache[uri] = parsed
 
-            settings.set("lyrics_total_tracks", total_tracks)
             self._lyrics_bulk_progress = None
             self._lyrics_bulk_done     = True
             self._refresh_lyrics_disk_count()
@@ -2684,9 +2683,8 @@ class App:
                                               y + (TRACK_ROW_H - stop_s.get_height()) // 2))
                 elif not self._lyrics_bulk_done:
                     disk  = self._lyrics_disk_count
-                    known = settings.get("lyrics_total_tracks") or 0
                     if disk >= 0:
-                        sub = f"{disk} / {known} cached" if known > 0 else f"{disk} cached"
+                        sub = f"{disk} cached"
                     else:
                         sub = "may be slow"
                     sub_s = _render_text(self._f_track_sm, sub, COL_TEXT_ALBUM)
