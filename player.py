@@ -221,6 +221,7 @@ class MopidyPlayer:
         self._wd_prog_elapsed = -1.0
         self._wd_recover_t    = 0.0    # last frozen-recovery attempt
         self._wd_recover_n    = 0      # attempts in the current frozen episode
+        self._wd_recover_target = -1   # queue pos the current episode is retrying
         self._wd_replays: dict[str, int] = {}  # uri → premature replays used
         self._wd_expect_uri   = ""     # song change to this uri is watchdog-made
         self._wd_expect_t     = 0.0
@@ -342,6 +343,7 @@ class MopidyPlayer:
         self._wd_prog_t       = now
         self._wd_prog_elapsed = -1.0
         self._wd_recover_n    = 0
+        self._wd_recover_target = -1
         self._wd_expect_uri   = ""
         self._wd_song_seek_used = False
 
@@ -379,6 +381,7 @@ class MopidyPlayer:
             self._wd_song_elapsed_max = elapsed
             self._wd_prog_t, self._wd_prog_elapsed = now, elapsed
             self._wd_recover_n = 0
+            self._wd_recover_target = -1
             self._wd_song_seek_used = False
             if prev_uri:
                 log.info("poll: song→  qlen=%s  nextsong=%s  elapsed=%.1f/%.1f  song=%s",
@@ -499,8 +502,21 @@ class MopidyPlayer:
         if self._wd_recover_n >= self._RECOVER_MAX:
             if self._wd_recover_n == self._RECOVER_MAX:
                 self._wd_recover_n += 1
-                log.error("watchdog: still frozen after %d recovery attempts — giving up",
-                          self._RECOVER_MAX)
+                qlen    = int(status.get("playlistlength", "0") or "0")
+                skip_to = self._wd_recover_target + 1
+                if self._wd_recover_target >= 0 and skip_to < qlen:
+                    # This position is unrecoverable (same track, same error,
+                    # every attempt) — move past it rather than stalling
+                    # forever.  Fresh attempt budget for the new position.
+                    log.error("watchdog: pos=%d unrecoverable after %d attempts — skipping to pos=%d",
+                              self._wd_recover_target, self._RECOVER_MAX, skip_to)
+                    self._wd_recover_n = 0
+                    self._wd_recover_t = now
+                    return self._play_pos(skip_to)
+                log.error("watchdog: pos=%d unrecoverable after %d attempts — no further track, stopping",
+                          self._wd_recover_target, self._RECOVER_MAX)
+                self._cmd("stop")
+                return True
             return False
         self._wd_recover_t  = now
         self._wd_recover_n += 1
@@ -531,6 +547,7 @@ class MopidyPlayer:
                 self._wd_song_seek_used = True
                 self._wd_prog_elapsed   = seek_to
                 self._wd_prog_t         = now
+        self._wd_recover_target = target
         log.warning("watchdog: playback frozen %.0fs (%s, elapsed=%.1f/%.1f) — play pos=%d seek=%.0f  attempt %d/%d",
                     frozen_for, why, elapsed, total, target, seek_to,
                     self._wd_recover_n, self._RECOVER_MAX)
