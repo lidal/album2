@@ -235,6 +235,7 @@ class MopidyPlayer:
         self._intent_retries = 0
         self._intent_skip_n  = 0       # outstanding user next/prev presses
         self._intent_skip_t  = 0.0
+        self._intent_skip_target = -1  # queue pos the presses should land on
 
         t = threading.Thread(target=self._poll_loop, daemon=True)
         t.start()
@@ -370,7 +371,7 @@ class MopidyPlayer:
             log.info("poll: detected single=1 during play — resetting")
             self._cmd("single", 0)
 
-        if cur_file != self._wd_song_uri:
+        if cur_file and cur_file != self._wd_song_uri:
             prev_uri, prev_idx = self._wd_song_uri, self._wd_song_idx
             prev_max, prev_tot = self._wd_song_elapsed_max, self._wd_song_total
             self._wd_song_uri, self._wd_song_idx = cur_file, song_idx
@@ -390,9 +391,12 @@ class MopidyPlayer:
                 else:
                     acted = self._check_premature(prev_uri, prev_idx, prev_max, prev_tot, now)
         else:
-            self._wd_song_idx     = song_idx      # queue ops can shift indexes
-            self._wd_song_total   = total or self._wd_song_total
-            self._wd_song_elapsed_max = max(self._wd_song_elapsed_max, elapsed)
+            # cur_file may be briefly empty during transitions — keep progress
+            # tracking on elapsed alone so freeze detection stays accurate.
+            if cur_file:
+                self._wd_song_idx     = song_idx  # queue ops can shift indexes
+                self._wd_song_total   = total or self._wd_song_total
+                self._wd_song_elapsed_max = max(self._wd_song_elapsed_max, elapsed)
             if abs(elapsed - self._wd_prog_elapsed) > 0.05:
                 self._wd_prog_t, self._wd_prog_elapsed = now, elapsed
                 self._wd_recover_n = 0            # progress → frozen episode over
@@ -479,10 +483,13 @@ class MopidyPlayer:
             return False
         if now - self._wd_recover_t < self._RECOVER_BACKOFF_S:
             return False
+        skip_target = -1
         if elapsed <= 0.5 and not finished:
             with self._intent_lock:
                 pick_in_flight = (self._intent_kind == "track"
                                   and now - self._intent_t < self._PICK_TIMEOUT_S + 8.0)
+                if self._intent_skip_n > 0 and now - self._intent_skip_t < 20.0:
+                    skip_target = self._intent_skip_target
             if pick_in_flight:
                 # A picked track is loading — the frozen state is the old
                 # stream dying.  _verify_pick owns recovery; replaying the
@@ -508,16 +515,11 @@ class MopidyPlayer:
         else:
             why    = "failed start" if elapsed <= 0.5 else "mid-track stall"
             target = song_idx if song_idx >= 0 else 0
-            if elapsed <= 0.5:
-                with self._intent_lock:
-                    pick_in_flight = (self._intent_kind == "track"
-                                      and now - self._intent_t < self._PICK_TIMEOUT_S + 8.0)
-                if pick_in_flight:
-                    # A picked track is loading — the frozen state is the old
-                    # stream dying.  _verify_pick owns recovery; replaying the
-                    # current (zombie) song here would fight it.
-                    self._wd_recover_n -= 1
-                    return False
+            if why == "failed start" and skip_target >= 0:
+                # The frozen start followed a user next/prev whose stream died
+                # — land on the position the skip aimed for, not the zombie.
+                qlen = int(status.get("playlistlength", "0") or "0")
+                why, target = "failed skip", min(skip_target, max(qlen - 1, 0))
             if (why == "mid-track stall" and elapsed > 20.0
                     and not self._wd_song_seek_used):
                 # One attempt per song: resume from where the stream died.
@@ -746,19 +748,28 @@ class MopidyPlayer:
         self._cmd("random", 0)
         self._cmd("consume", 0)
 
-    def _note_skip(self):
+    def _note_skip(self, direction: int):
         """Record a user next/prev press so the watchdog knows the upcoming
-        song change is intentional (one press = one expected change)."""
+        song change is intentional (one press = one expected change) and,
+        if the skip's stream dies, which queue position it should land on."""
+        cur_idx = int(self.get_status().get("song", "-1") or "-1")
+        now = time.monotonic()
         with self._intent_lock:
+            if (self._intent_skip_n > 0 and now - self._intent_skip_t < 20.0
+                    and self._intent_skip_target >= 0):
+                base = self._intent_skip_target   # stack rapid presses
+            else:
+                base = cur_idx
+            self._intent_skip_target = max(0, base + direction) if base >= 0 else -1
             self._intent_skip_n += 1
-            self._intent_skip_t = time.monotonic()
+            self._intent_skip_t  = now
 
     def next(self):
-        self._note_skip()
+        self._note_skip(+1)
         self._cmd("next")
 
     def previous(self):
-        self._note_skip()
+        self._note_skip(-1)
         self._cmd("previous")
 
     def set_volume(self, vol: int):
