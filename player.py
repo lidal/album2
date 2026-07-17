@@ -470,6 +470,16 @@ class MopidyPlayer:
             return False
         if now - self._wd_recover_t < self._RECOVER_BACKOFF_S:
             return False
+        if elapsed <= 0.5 and not finished:
+            with self._intent_lock:
+                pick_in_flight = (self._intent_kind == "track"
+                                  and now - self._intent_t < self._PICK_TIMEOUT_S + 8.0)
+            if pick_in_flight:
+                # A picked track is loading — the frozen state is the old
+                # stream dying.  _verify_pick owns recovery; replaying the
+                # current (zombie) song here would cancel the pick's load
+                # and the two would fight indefinitely.
+                return False
         if self._wd_recover_n >= self._RECOVER_MAX:
             if self._wd_recover_n == self._RECOVER_MAX:
                 self._wd_recover_n += 1
@@ -479,6 +489,7 @@ class MopidyPlayer:
         self._wd_recover_t  = now
         self._wd_recover_n += 1
         next_idx = int(status.get("nextsong", "-1") or "-1")
+        seek_to  = 0.0
         if finished and next_idx >= 0:
             why, target = "end-transition", next_idx
         elif finished:
@@ -488,10 +499,25 @@ class MopidyPlayer:
         else:
             why    = "failed start" if elapsed <= 0.5 else "mid-track stall"
             target = song_idx if song_idx >= 0 else 0
-        log.warning("watchdog: playback frozen %.0fs (%s, elapsed=%.1f/%.1f) — play pos=%d  attempt %d/%d",
-                    frozen_for, why, elapsed, total, target,
+            if elapsed <= 0.5:
+                with self._intent_lock:
+                    pick_in_flight = (self._intent_kind == "track"
+                                      and now - self._intent_t < self._PICK_TIMEOUT_S + 8.0)
+                if pick_in_flight:
+                    # A picked track is loading — the frozen state is the old
+                    # stream dying.  _verify_pick owns recovery; replaying the
+                    # current (zombie) song here would fight it.
+                    self._wd_recover_n -= 1
+                    return False
+            if why == "mid-track stall" and self._wd_recover_n == 1 and elapsed > 20.0:
+                # First attempt: resume from where the stream died.  If the
+                # seek freezes the stream again, the next attempt restarts
+                # the track from 0.
+                seek_to = elapsed
+        log.warning("watchdog: playback frozen %.0fs (%s, elapsed=%.1f/%.1f) — play pos=%d seek=%.0f  attempt %d/%d",
+                    frozen_for, why, elapsed, total, target, seek_to,
                     self._wd_recover_n, self._RECOVER_MAX)
-        return self._play_pos(target)
+        return self._play_pos(target, seek_to=seek_to)
 
     # ── watchdog: stop / pause state ──────────────────────────────────────────
 
