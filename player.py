@@ -224,6 +224,7 @@ class MopidyPlayer:
         self._wd_replays: dict[str, int] = {}  # uri → premature replays used
         self._wd_expect_uri   = ""     # song change to this uri is watchdog-made
         self._wd_expect_t     = 0.0
+        self._wd_song_seek_used = False  # one seek-restore attempt per song
 
         # ── user-intent tracking (watchdog input, shared across threads) ──
         self._intent_lock    = threading.Lock()
@@ -278,6 +279,12 @@ class MopidyPlayer:
             if not self._ctrl_ok:
                 time.sleep(3)
                 with self._ctrl_lock:
+                    try:
+                        # python-mpd2 refuses connect() while it still thinks
+                        # it's connected — always tear down first.
+                        self._ctrl.disconnect()
+                    except Exception:
+                        pass
                     self._ctrl_ok = _connect(self._ctrl)
                 continue
             try:
@@ -335,6 +342,7 @@ class MopidyPlayer:
         self._wd_prog_elapsed = -1.0
         self._wd_recover_n    = 0
         self._wd_expect_uri   = ""
+        self._wd_song_seek_used = False
 
     # ── watchdog: play state ──────────────────────────────────────────────────
 
@@ -370,6 +378,7 @@ class MopidyPlayer:
             self._wd_song_elapsed_max = elapsed
             self._wd_prog_t, self._wd_prog_elapsed = now, elapsed
             self._wd_recover_n = 0
+            self._wd_song_seek_used = False
             if prev_uri:
                 log.info("poll: song→  qlen=%s  nextsong=%s  elapsed=%.1f/%.1f  song=%s",
                          status.get("playlistlength", "—"), status.get("nextsong", "—"),
@@ -509,11 +518,17 @@ class MopidyPlayer:
                     # current (zombie) song here would fight it.
                     self._wd_recover_n -= 1
                     return False
-            if why == "mid-track stall" and self._wd_recover_n == 1 and elapsed > 20.0:
-                # First attempt: resume from where the stream died.  If the
-                # seek freezes the stream again, the next attempt restarts
+            if (why == "mid-track stall" and elapsed > 20.0
+                    and not self._wd_song_seek_used):
+                # One attempt per song: resume from where the stream died.
+                # Seeking can itself freeze the stream, so pre-set the
+                # progress marker to the seek target — a re-freeze then
+                # doesn't look like progress, and the next attempt restarts
                 # the track from 0.
                 seek_to = elapsed
+                self._wd_song_seek_used = True
+                self._wd_prog_elapsed   = seek_to
+                self._wd_prog_t         = now
         log.warning("watchdog: playback frozen %.0fs (%s, elapsed=%.1f/%.1f) — play pos=%d seek=%.0f  attempt %d/%d",
                     frozen_for, why, elapsed, total, target, seek_to,
                     self._wd_recover_n, self._RECOVER_MAX)
@@ -585,12 +600,17 @@ class MopidyPlayer:
 
     # ── watchdog: helpers ─────────────────────────────────────────────────────
 
-    def _play_pos(self, pos: int) -> bool:
+    def _play_pos(self, pos: int, seek_to: float = 0.0) -> bool:
         """Explicit play by queue position (never `next` — see watchdog note)."""
         with self._ctrl_lock:
             try:
                 self._ctrl.play(str(pos))
+                if seek_to > 0.0:
+                    self._ctrl.seekcur(str(seek_to))
                 return True
+            except mpd.CommandError as e:
+                log.warning("watchdog: play %d rejected: %s", pos, e)
+                return False    # connection is fine — only the command failed
             except Exception as e:
                 log.warning("watchdog: play %d failed: %s", pos, e)
                 self._ctrl_ok = False
@@ -626,6 +646,9 @@ class MopidyPlayer:
         try:
             with self._ctrl_lock:
                 getattr(self._ctrl, name)(*args)
+        except mpd.CommandError as e:
+            # e.g. `next` past the end of the queue — connection is fine.
+            log.warning("Command %s rejected: %s", name, e)
         except Exception as e:
             log.warning("Command %s failed: %s", name, e)
             self._ctrl_ok = False
