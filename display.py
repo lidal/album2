@@ -4437,16 +4437,12 @@ class App:
                 elif (self._panel_touch and self._view == View.ALBUM
                       and self._art_count > 1 and total_dx > total_dy):
                     # Horizontal drag on the album panel scrolls the art
-                    # carousel (front → back → booklet), rubber-banded at ends.
+                    # carousel (front → back → booklet).  Hard-clamp at both
+                    # ends — no overscroll, so the panel is always fully covered.
                     self._art_drag = True
                     delta = (self._t_start_pos[0] - pos[0]) / float(W)
                     raw   = self._art_drag_base + delta
-                    lo, hi = 0.0, float(self._art_count - 1)
-                    if raw < lo:
-                        raw = lo - (lo - raw) * 0.35
-                    elif raw > hi:
-                        raw = hi + (raw - hi) * 0.35
-                    self._art_pos = raw
+                    self._art_pos = max(0.0, min(float(self._art_count - 1), raw))
                 elif self._panel_touch and total_dy >= total_dx:
                     new_y = self._panel_drag_base_y + (pos[1] - self._panel_drag_start)
                     new_y = max(float(_TL_ALBUM_Y), min(float(H - TRACKLIST_ART_H), new_y))

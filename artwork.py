@@ -492,10 +492,21 @@ class ArtworkFetcher:
 
     @staticmethod
     def _split_spread(img: Image.Image) -> list[Image.Image]:
+        """Split a multi-page scan into single ~square pages.
+
+        A whole booklet can arrive as one wide strip (all pages side by side)
+        or one tall strip; split into as many equal panels as the aspect ratio
+        implies (round(long/short)) so each resulting page is under the ratio.
+        """
         w, h = img.size
-        if h > 0 and w / h >= _SPREAD_RATIO:
-            mid = w // 2
-            return [img.crop((0, 0, mid, h)), img.crop((mid, 0, w, h))]
+        if w <= 0 or h <= 0:
+            return [img]
+        if w / h >= _SPREAD_RATIO:
+            n = max(2, round(w / h))
+            return [img.crop((w * i // n, 0, w * (i + 1) // n, h)) for i in range(n)]
+        if h / w >= _SPREAD_RATIO:
+            n = max(2, round(h / w))
+            return [img.crop((0, h * i // n, w, h * (i + 1) // n)) for i in range(n)]
         return [img]
 
     @staticmethod
