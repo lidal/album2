@@ -188,10 +188,20 @@ def main():
         # loop sleeps after the vsync to honour the lower rate.
         # fbdev path: target 58fps (1000/58=17ms → 58.8fps, just below 60Hz display
         # rate so the write never catches the scan — no rolling tear line).
-        _ticked = not (drew and fb and fb.paces_loop) or (drew and fps < 60)
+        #
+        # target_fps() already returns 60 whenever there's been recent input and
+        # 10 only when genuinely idle — that determination must drive the sleep
+        # even on a loop iteration that didn't draw anything (nothing changed
+        # that particular iteration). The previous code instead hardcoded a
+        # 15fps (66.7ms) sleep on every non-drawing iteration regardless of
+        # `fps`, so a single iteration with no new touch event during an active
+        # drag would throttle the *next* iteration's event poll by up to 66ms —
+        # exactly the peek-drag stutter seen in the "slow frame" diagnostics
+        # (gaps landing on clean multiples of that 66.7ms/15fps period).
+        _ticked = not (drew and fb and fb.paces_loop) or fps < 60
         if _ticked:
             _t_tick0 = time.perf_counter()
-            clock.tick(min(fps, 58) if drew else min(fps, 15))
+            clock.tick(min(fps, 58))
             _prev_tick_ms = (time.perf_counter() - _t_tick0) * 1000
         else:
             _prev_tick_ms = 0.0
