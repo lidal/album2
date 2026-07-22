@@ -50,9 +50,10 @@ import time
 from enum import IntEnum
 
 import settings
+from artwork import ArtworkFetcher
 
 import pygame
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
@@ -239,6 +240,9 @@ _SETTINGS_ITEMS = [
     (None,          "SPOTIFY"),
     ("spotify_bitrate", "Bitrate"),
     ("lyrics_cache_all", "Cache all lyrics"),
+    (None,          "ARTWORK"),
+    ("art_cache_local",   "Fetch artwork (local)"),
+    ("art_cache_spotify", "Fetch artwork (Spotify)"),
     (None,          "GRID"),
     ("grid_labels", "Show album & artist names"),
     ("carousel",    "Carousel view"),
@@ -331,6 +335,23 @@ class App:
         # switching back to a previous album is instant.
         self._art_mem: collections.OrderedDict[str, pygame.Surface | None] = \
             collections.OrderedDict()
+
+        # ── extended artwork carousel (front + back + booklet) ──
+        # Image 0 is always the front (self._art, from the player's embedded
+        # art); images 1..N are back/booklet pages fetched by ArtworkFetcher.
+        self._artwork = ArtworkFetcher()
+        self._art_paths:   list[str] = []     # disk paths for images 1..N
+        self._art_count:   int   = 1          # total carousel images (>=1)
+        self._art_pos:     float = 0.0        # current (lerped) carousel position
+        self._art_pos_t:   float = 0.0        # target position (settled index)
+        self._art_idx:     int   = 0          # settled index (for prep window)
+        self._art_drag:    bool  = False      # horizontal art drag in progress
+        self._art_drag_base: float = 0.0      # _art_pos at drag start
+        self._art_fetching: set[str] = set()  # album_uris with an in-flight fetch
+        # Prepared 720² surfaces for extra pages, keyed by (album_uri, idx).
+        self._art_page_surf: collections.OrderedDict[tuple, pygame.Surface] = \
+            collections.OrderedDict()
+        self._ART_PAGE_MAX = 5                # keep a small window in memory
         self._palette_col: dict[str, tuple] = {}        # uri → (bg, accent)
         self._tl_bg_cur:  list  = list(COL_TL_BG)      # current (animated) tl bg colour
         self._tl_bg_t:    tuple = COL_TL_BG             # target tl bg colour
@@ -415,6 +436,9 @@ class App:
         self._lyrics_cache:    dict  = {}    # uri → parsed tuple or None (session cache)
         self._prefetch_gen:    int   = 0    # incremented on each new album; cancels old prefetch
         self._lyrics_bulk_progress: tuple | None = None  # (done, total) while running
+        # Extended-artwork bulk fetch: (done, total, library) while running.
+        self._art_bulk_progress: tuple | None = None
+        self._art_lib_counts: dict[str, tuple[int, int]] = {}  # library → (done, total)
         self._lyrics_anim_vis:   float = 0.0  # animated scroll position (visual rows)
         self._lyrics_target_vis: float = 0.0  # target scroll position
         self._lyrics_prev_idx:   int   = -1   # last known logical line index
@@ -769,6 +793,135 @@ class App:
 
         threading.Thread(target=_bg, daemon=True).start()
 
+    # ── extended artwork carousel ─────────────────────────────────────────────
+
+    def _reset_art_carousel(self):
+        """Clear carousel state when switching albums."""
+        self._art_paths      = []
+        self._art_count      = 1
+        self._art_pos        = 0.0
+        self._art_pos_t      = 0.0
+        self._art_idx        = 0
+        self._art_drag       = False
+        self._art_page_surf.clear()
+
+    def _load_art_set(self, album: dict, allow_fetch: bool = True):
+        """Populate the carousel with cached extended art, or fetch it.
+
+        Image 0 (front) comes from the normal _load_art pipeline; this adds the
+        back/booklet pages.  If nothing is cached yet and *allow_fetch*, a
+        background fetch runs and the carousel is refreshed when it completes.
+        """
+        album_uri = album.get("track_uri", "")
+        if not album_uri:
+            return
+        cached = self._artwork.cached_images(album_uri)
+        if cached is not None:
+            self._art_paths = cached
+            self._art_count = 1 + len(cached)
+            self._ensure_art_window()
+            return
+        if not allow_fetch:
+            return
+        # Not fetched yet — kick a background fetch keyed to this album.
+        if album_uri in self._art_fetching:
+            return
+        self._art_fetching.add(album_uri)
+        artist = album.get("artist", "")
+        name   = album.get("name", "")
+
+        def _on_image(path):
+            # Append each page as it arrives so the carousel grows live.
+            if album_uri != self._art_album_uri:
+                return
+            if path not in self._art_paths:
+                self._art_paths.append(path)
+                self._art_count = 1 + len(self._art_paths)
+                self._ensure_art_window()
+                self._dirty = True
+
+        def _bg():
+            try:
+                tracks = album.get("tracks")
+                track_count = len(tracks) if tracks else 0
+                self._artwork.fetch(album_uri, artist, name, track_count,
+                                    on_image=_on_image)
+            except Exception as e:
+                log.warning("art set fetch failed for %s: %s", album_uri, e)
+            finally:
+                self._art_fetching.discard(album_uri)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _art_surface(self, idx: int) -> pygame.Surface | None:
+        """Return the 720² surface for carousel index *idx* (0 = front)."""
+        if idx <= 0:
+            return self._art
+        page = idx - 1
+        if page >= len(self._art_paths):
+            return None
+        key = (self._art_album_uri, idx)
+        surf = self._art_page_surf.get(key)
+        if surf is not None:
+            self._art_page_surf.move_to_end(key)
+            return surf
+        return None   # not prepared yet; _ensure_art_window schedules it
+
+    def _ensure_art_window(self):
+        """Prepare surfaces for the current index ±1 in a background thread,
+        and evict pages outside a small window to bound memory."""
+        want = {i for i in (self._art_idx - 1, self._art_idx, self._art_idx + 1)
+                if 1 <= i < self._art_count}
+        # Bound memory: LRU-evict the least-recently-used prepared pages.
+        while len(self._art_page_surf) > self._ART_PAGE_MAX:
+            self._art_page_surf.popitem(last=False)
+
+        missing = [i for i in want
+                   if (self._art_album_uri, i) not in self._art_page_surf]
+        if not missing:
+            return
+
+        album_uri = self._art_album_uri
+        paths     = list(self._art_paths)
+
+        def _bg():
+            for i in missing:
+                page = i - 1
+                if page < 0 or page >= len(paths):
+                    continue
+                key = (album_uri, i)
+                if key in self._art_page_surf:
+                    continue
+                try:
+                    img  = Image.open(paths[page]).convert("RGB")
+                    surf = self._fit_art_surface(img)
+                    if album_uri == self._art_album_uri:
+                        self._art_page_surf[key] = surf
+                        self._dirty = True
+                except Exception as e:
+                    log.debug("art page %d prep failed: %s", i, e)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    @staticmethod
+    def _fit_art_surface(img: Image.Image) -> pygame.Surface:
+        """Fit *img* into a W×H square: blurred cover as background, sharp
+        contained image centred on top."""
+        iw, ih = img.size
+        # Background: cover-scale then blur + darken.
+        cover = max(W / iw, H / ih)
+        bg = img.resize((max(1, int(iw * cover)), max(1, int(ih * cover))), Image.LANCZOS)
+        bx = (bg.width - W) // 2
+        by = (bg.height - H) // 2
+        bg = bg.crop((bx, by, bx + W, by + H)).filter(ImageFilter.GaussianBlur(18))
+        bg = Image.eval(bg, lambda p: int(p * 0.45))
+        # Foreground: contain-scale, centred.
+        contain = min(W / iw, H / ih)
+        fw, fh  = max(1, int(iw * contain)), max(1, int(ih * contain))
+        fg = img.resize((fw, fh), Image.LANCZOS)
+        bg.paste(fg, ((W - fw) // 2, (H - fh) // 2))
+        return _pil_to_surf(bg)
+
     # ── volume ────────────────────────────────────────────────────────────────
 
     def _on_volume(self, vol: int):
@@ -790,6 +943,12 @@ class App:
         if (self._carousel_pos_t % 1.0 == 0.0
                 and abs(self._carousel_pos - self._carousel_pos_t) < 0.005):
             self._carousel_pos = self._carousel_pos_t
+
+        # Art carousel: follow the target unless a finger is actively dragging.
+        if not self._art_drag:
+            self._art_pos = _lerp(self._art_pos, self._art_pos_t, k_pan)
+            if abs(self._art_pos - self._art_pos_t) < 0.004:
+                self._art_pos = self._art_pos_t
 
         k_bg = min(1.0, 3.0 * dt)
         self._tl_bg_cur = [_lerp(self._tl_bg_cur[i], self._tl_bg_t[i], k_bg) for i in range(3)]
@@ -850,6 +1009,8 @@ class App:
                 or self._scan_refreshing
                 or self._lyrics_loading
                 or self._art_loading
+                or self._art_drag
+                or abs(self._art_pos - self._art_pos_t) > 0.002
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -1032,6 +1193,8 @@ class App:
                 or self._scan_refreshing
                 or self._lyrics_loading
                 or self._art_loading
+                or self._art_drag
+                or abs(self._art_pos - self._art_pos_t) > 0.002
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -1433,8 +1596,36 @@ class App:
             self.screen.blit(self._default_bg, (0, ay))
             self._draw_spinner(W // 2, ay + H // 2)
             return
-        art = self._art or self._default_bg
-        self.screen.blit(art, (0, ay))
+        art0 = self._art or self._default_bg
+        # Carousel only in full ALBUM view; peek/tracklist strips show the front.
+        if self._view != View.ALBUM or (self._art_count <= 1 and self._art_pos == 0.0):
+            self.screen.blit(art0, (0, ay))
+            return
+        pos  = self._art_pos
+        base = int(math.floor(pos))
+        frac = pos - base
+        for idx, x in ((base, round(-frac * W)), (base + 1, round((1.0 - frac) * W))):
+            if 0 <= idx < self._art_count:
+                surf = self._art_surface(idx) or self._default_bg
+                self.screen.blit(surf, (x, ay))
+        # Page indicator dots when more than one image and near a settle.
+        if self._art_count > 1:
+            self._draw_art_dots(ay)
+
+    def _draw_art_dots(self, ay: int):
+        n = self._art_count
+        if n <= 1:
+            return
+        r   = max(2, W // 200)
+        gap = r * 4
+        total_w = gap * (n - 1)
+        cx0 = W // 2 - total_w // 2
+        cy  = ay + H - max(16, H // 32)
+        cur = int(round(self._art_pos))
+        for i in range(n):
+            c = (235, 235, 235) if i == cur else (110, 110, 110)
+            pygame.gfxdraw.filled_circle(self.screen, cx0 + i * gap, cy, r, c)
+            pygame.gfxdraw.aacircle(self.screen, cx0 + i * gap, cy, r, c)
 
     def _draw_spinner(self, cx: int, cy: int):
         t     = pygame.time.get_ticks() / 1000.0
@@ -1728,6 +1919,10 @@ class App:
             self._art_uri       = uri
             self._art_album_uri = uri
             self._load_art(uri)
+            self._reset_art_carousel()
+            # Show cached back/booklet instantly; fetching (if needed) happens
+            # in _load() once the real track count is known.
+            self._load_art_set(album, allow_fetch=False)
 
         # load tracks + pause at track 0 in background
         def _load():
@@ -1746,6 +1941,11 @@ class App:
 
                 album["tracks"] = tracks
                 self._tracks = tracks
+                # Extended artwork (back/booklet): fetch now that we know the
+                # track count, unless it's already cached.  Populates the
+                # carousel progressively as pages arrive.
+                if album.get("track_uri", "") == self._art_album_uri:
+                    self._load_art_set(album, allow_fetch=True)
                 if tracks and settings.get("lyrics"):
                     self._prefetch_album_lyrics(tracks)
                 if tracks:
@@ -1825,6 +2025,7 @@ class App:
         self._settings_scroll = 0.0
         self._settings_vel    = 0.0
         self._view        = View.SETTINGS
+        self._refresh_art_counts()
         if self.bt and self.bt.available and not self._bt_refreshing:
             self._bt_refreshing   = True
             self._bt_last_refresh = pygame.time.get_ticks()
@@ -2079,6 +2280,58 @@ class App:
             self._lyrics_bulk_progress = None
             self._dirty = True
             log.info("bulk lyrics: done — %d albums", total)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── bulk extended-artwork fetch ───────────────────────────────────────────
+
+    def _refresh_art_counts(self):
+        """Background-count how many albums per library already have artwork."""
+        def _bg():
+            for lib in ("local", "spotify"):
+                try:
+                    albums = self.player.get_albums(lib) or []
+                    done   = sum(1 for a in albums
+                                 if self._artwork.is_done(a.get("track_uri", "")))
+                    self._art_lib_counts[lib] = (done, len(albums))
+                    self._dirty = True
+                except Exception as e:
+                    log.debug("art counts %s: %s", lib, e)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _start_art_bulk_cache(self, library: str):
+        """Fetch extended artwork for every album in *library* ('local'|'spotify')."""
+        if self._art_bulk_progress is not None:
+            return   # one bulk run at a time (shared MusicBrainz rate limit)
+        self._art_bulk_progress = (0, 0, library)
+        self._dirty = True
+
+        def _run():
+            try:
+                albums = self.player.get_albums(library) or []
+            except Exception:
+                log.exception("bulk art: failed listing %s", library)
+                albums = []
+            total = len(albums)
+            for i, album in enumerate(albums):
+                prog = self._art_bulk_progress
+                if prog is None or prog[2] != library:
+                    return   # cancelled
+                self._art_bulk_progress = (i, total, library)
+                self._dirty = True
+                uri = album.get("track_uri", "")
+                if uri and not self._artwork.is_done(uri):
+                    tracks = album.get("tracks") or []
+                    tc = len(tracks)
+                    try:
+                        self._artwork.fetch(uri, album.get("artist", ""),
+                                            album.get("name", ""), tc)
+                    except Exception:
+                        log.exception("bulk art: failed for %s", album.get("name"))
+            self._art_bulk_progress = None
+            self._refresh_art_counts()
+            self._dirty = True
+            log.info("bulk artwork (%s): done — %d albums", library, total)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2701,6 +2954,36 @@ class App:
                 elif not all_done:
                     sub   = f"{cached_n} / {total_n} albums" if total_n > 0 else "may be slow"
                     sub_s = _render_text(self._f_track_sm, sub, COL_TEXT_ALBUM)
+                    self.screen.blit(sub_s, (W - BTN_MARGIN - sub_s.get_width(),
+                                             y + (TRACK_ROW_H - sub_s.get_height()) // 2))
+            elif key in ("art_cache_local", "art_cache_spotify"):
+                library  = "local" if key == "art_cache_local" else "spotify"
+                bulk     = self._art_bulk_progress
+                running  = bulk is not None and bulk[2] == library
+                other    = bulk is not None and bulk[2] != library
+                counts   = self._art_lib_counts.get(library)
+                done_n, total_n = counts if counts else (0, 0)
+                all_done = counts is not None and total_n > 0 and done_n >= total_n
+                if running:
+                    lbl, lbl_col = f"Fetching artwork… {bulk[0]}/{bulk[1]}", COL_TRACK_NUM
+                elif all_done:
+                    lbl, lbl_col = f"Artwork cached ({library})", COL_TEXT_ALBUM
+                elif other:
+                    lbl, lbl_col = label, COL_TRACK_NUM   # dimmed while other runs
+                else:
+                    lbl, lbl_col = label, COL_HIGHLIGHT
+                sl = _render_text(self._f_track, lbl, lbl_col)
+                self.screen.blit(sl, (BTN_MARGIN, y + (TRACK_ROW_H - sl.get_height()) // 2))
+                if running:
+                    bar_w = int((W - BTN_MARGIN * 2) * bulk[0] / max(1, bulk[1]))
+                    pygame.draw.rect(self.screen, COL_HIGHLIGHT,
+                                     (BTN_MARGIN, y + TRACK_ROW_H - 3, bar_w, 3))
+                    stop_s = _render_text(self._f_track_sm, "Stop", COL_HIGHLIGHT)
+                    self.screen.blit(stop_s, (W - BTN_MARGIN - stop_s.get_width(),
+                                              y + (TRACK_ROW_H - stop_s.get_height()) // 2))
+                elif not all_done and counts is not None:
+                    sub_s = _render_text(self._f_track_sm, f"{done_n} / {total_n} albums",
+                                         COL_TEXT_ALBUM)
                     self.screen.blit(sub_s, (W - BTN_MARGIN - sub_s.get_width(),
                                              y + (TRACK_ROW_H - sub_s.get_height()) // 2))
             else:
@@ -3550,6 +3833,14 @@ class App:
                     else:
                         self._start_lyrics_bulk_cache()
                     self._dirty = True
+                elif key in ("art_cache_local", "art_cache_spotify"):
+                    library = "local" if key == "art_cache_local" else "spotify"
+                    prog = self._art_bulk_progress
+                    if prog is not None and prog[2] == library:
+                        self._art_bulk_progress = None       # cancel this library's run
+                    elif prog is None:
+                        self._start_art_bulk_cache(library)  # ignore taps while other runs
+                    self._dirty = True
                 else:
                     settings.toggle(key)
                     if key == "carousel":
@@ -4120,6 +4411,7 @@ class App:
                 if self._panel_touch:
                     self._panel_drag_base_y = self._album_y
                     self._panel_drag_start  = pos[1]
+                    self._art_drag_base     = self._art_pos   # for horizontal art swipe
                 if self._view == View.CAROUSEL:
                     self._carousel_drag_start = self._carousel_pos
             self._dirty = True   # immediate press highlight
@@ -4142,6 +4434,19 @@ class App:
                 elif self._lyrics_drag:
                     self._lyrics_scroll -= dy / (self._f_lyrics.get_linesize()
                                                   + max(2, self._f_lyrics.get_linesize() // 6))
+                elif (self._panel_touch and self._view == View.ALBUM
+                      and self._art_count > 1 and total_dx > total_dy):
+                    # Horizontal drag on the album panel scrolls the art
+                    # carousel (front → back → booklet), rubber-banded at ends.
+                    self._art_drag = True
+                    delta = (self._t_start_pos[0] - pos[0]) / float(W)
+                    raw   = self._art_drag_base + delta
+                    lo, hi = 0.0, float(self._art_count - 1)
+                    if raw < lo:
+                        raw = lo - (lo - raw) * 0.35
+                    elif raw > hi:
+                        raw = hi + (raw - hi) * 0.35
+                    self._art_pos = raw
                 elif self._panel_touch and total_dy >= total_dx:
                     new_y = self._panel_drag_base_y + (pos[1] - self._panel_drag_start)
                     new_y = max(float(_TL_ALBUM_Y), min(float(H - TRACKLIST_ART_H), new_y))
@@ -4216,6 +4521,27 @@ class App:
 
             swipe_h = abs(total_x) >= SWIPE_H_MIN and abs(total_x) > abs(total_y)
 
+            # Art carousel drag release: snap to the nearest image, with a
+            # decisive flick guaranteeing at least one step in its direction.
+            if self._art_drag:
+                self._art_drag = False
+                base_idx = int(round(self._art_drag_base))
+                target   = int(round(self._art_pos))
+                if swipe_h and target == base_idx:
+                    target = base_idx + (1 if total_x < 0 else -1)
+                target = max(0, min(self._art_count - 1, target))
+                self._art_pos_t = float(target)
+                self._art_idx   = target
+                self._ensure_art_window()
+                self._t_start_pos    = None
+                self._t_prev_pos     = None
+                self._t_dragging     = False
+                self._t_long_pressed = False
+                self._panel_touch    = False
+                self._lyrics_drag    = False
+                self._dirty          = True
+                return
+
             # horizontal swipe on album art bypasses panel snap
             if self._panel_touch and self._t_dragging and not (swipe_h and self._view == View.ALBUM):
                 self._snap_panel(total_y)
@@ -4245,12 +4571,11 @@ class App:
                     self._close_settings()
 
                 elif swipe_h and self._view == View.ALBUM:
-                    if total_x < 0:
-                        self.player.next(); self._reset_elapsed()
-                        self._show_flash("next")
-                    else:
-                        self.player.previous(); self._reset_elapsed()
-                        self._show_flash("prev")
+                    # Horizontal swipe now scrolls the art carousel (handled by
+                    # the _art_drag release above).  With no extra art there is
+                    # nothing to scroll; prev/next track lives on the control
+                    # overlay's arrows.
+                    pass
 
                 elif self._view == View.CAROUSEL:
                     # Snap to nearest album after drag/flick; tap handled below.
