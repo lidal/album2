@@ -894,7 +894,11 @@ class App:
                     continue
                 try:
                     img  = Image.open(paths[page]).convert("RGB")
-                    surf = self._fit_art_surface(img)
+                    # Back covers often carry spine strips on the sides — fill
+                    # the height and crop the left/right so the back shows big.
+                    mode = ("height" if "_back" in os.path.basename(paths[page]).lower()
+                            else "contain")
+                    surf = self._fit_art_surface(img, mode)
                     if album_uri == self._art_album_uri:
                         self._art_page_surf[key] = surf
                         self._dirty = True
@@ -904,17 +908,35 @@ class App:
         threading.Thread(target=_bg, daemon=True).start()
 
     @staticmethod
-    def _fit_art_surface(img: Image.Image) -> pygame.Surface:
-        """Fit *img* into a W×H square: blurred cover as background, sharp
-        contained image centred on top."""
+    def _fit_art_surface(img: Image.Image, mode: str = "contain") -> pygame.Surface:
+        """Fit *img* into the W×H square.
+
+        "contain" (default): whole image visible, centred on a blurred cover.
+        "height": scale to full height and centre, cropping the left/right —
+        used for back covers so spine strips get cropped off and the back
+        fills the screen.
+        """
         iw, ih = img.size
-        # Background: cover-scale then blur + darken.
+        # Background: cover-scale then blur + darken (used when the sharp image
+        # doesn't fully cover the square).
         cover = max(W / iw, H / ih)
         bg = img.resize((max(1, int(iw * cover)), max(1, int(ih * cover))), Image.LANCZOS)
         bx = (bg.width - W) // 2
         by = (bg.height - H) // 2
         bg = bg.crop((bx, by, bx + W, by + H)).filter(ImageFilter.GaussianBlur(18))
         bg = Image.eval(bg, lambda p: int(p * 0.45))
+
+        if mode == "height":
+            scale = H / ih
+            fw = max(1, round(iw * scale))
+            fg = img.resize((fw, H), Image.LANCZOS)
+            if fw >= W:
+                x = (fw - W) // 2
+                return _pil_to_surf(fg.crop((x, 0, x + W, H)))
+            # Narrower than the screen after height-fill — centre on the bg.
+            bg.paste(fg, ((W - fw) // 2, 0))
+            return _pil_to_surf(bg)
+
         # Foreground: contain-scale, centred.
         contain = min(W / iw, H / ih)
         fw, fh  = max(1, int(iw * contain)), max(1, int(ih * contain))
