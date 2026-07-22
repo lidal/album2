@@ -84,6 +84,8 @@ _LYRICS_INDEX_PATH = os.path.expanduser("~/.cache/album2/lyrics_index.json")
 _LRC_TS_RE = re.compile(r'^\[(\d+):(\d+(?:\.\d+)?)\]')   # capture mm:ss.xx
 _LRC_META_RE = re.compile(r'^\[\w+:[^\]]*\]')             # metadata like [ti:...]
 
+_ART_DOTS_HOLD_MS = 2000   # how long the page dots stay visible after the last slide
+
 W, H = SCREEN_WIDTH, SCREEN_HEIGHT
 
 _THUMB_CACHE_DIR = (THUMB_CACHE_DIR
@@ -347,6 +349,9 @@ class App:
         self._art_idx:     int   = 0          # settled index (for prep window)
         self._art_drag:    bool  = False      # horizontal art drag in progress
         self._art_drag_base: float = 0.0      # _art_pos at drag start
+        self._art_dots_a:      float = 0.0    # page-dots opacity (0-255), autohides
+        self._art_dots_a_t:    float = 0.0    # target opacity
+        self._art_dots_seen_ms: int  = 0      # last time the carousel was moving
         self._art_fetching: set[str] = set()  # album_uris with an in-flight fetch
         # Prepared 720² surfaces for extra pages, keyed by (album_uri, idx).
         self._art_page_surf: collections.OrderedDict[tuple, pygame.Surface] = \
@@ -803,6 +808,9 @@ class App:
         self._art_pos_t      = 0.0
         self._art_idx        = 0
         self._art_drag       = False
+        self._art_dots_a     = 0.0
+        self._art_dots_a_t   = 0.0
+        self._art_dots_seen_ms = 0
         self._art_page_surf.clear()
 
     def _load_art_set(self, album: dict, allow_fetch: bool = True):
@@ -982,6 +990,15 @@ class App:
             if abs(self._art_pos - self._art_pos_t) < 0.004:
                 self._art_pos = self._art_pos_t
 
+        # Page dots: full opacity while sliding, hold, then fade out.
+        art_moving = self._art_drag or abs(self._art_pos - self._art_pos_t) > 0.004
+        if art_moving:
+            self._art_dots_a_t     = 255.0
+            self._art_dots_seen_ms = now_ms
+        elif now_ms - self._art_dots_seen_ms > _ART_DOTS_HOLD_MS:
+            self._art_dots_a_t = 0.0
+        self._art_dots_a = _lerp(self._art_dots_a, self._art_dots_a_t, k_ctl)
+
         k_bg = min(1.0, 3.0 * dt)
         self._tl_bg_cur = [_lerp(self._tl_bg_cur[i], self._tl_bg_t[i], k_bg) for i in range(3)]
         self._accent_cur = [_lerp(self._accent_cur[i], self._accent_t[i], k_bg) for i in range(3)]
@@ -1043,6 +1060,7 @@ class App:
                 or self._art_loading
                 or self._art_drag
                 or abs(self._art_pos - self._art_pos_t) > 0.002
+                or abs(self._art_dots_a - self._art_dots_a_t) > 0.5
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -1227,6 +1245,7 @@ class App:
                 or self._art_loading
                 or self._art_drag
                 or abs(self._art_pos - self._art_pos_t) > 0.002
+                or abs(self._art_dots_a - self._art_dots_a_t) > 0.5
                 or self._scrub_active
                 or abs(self._grid_vel) > 0.5
                 or abs(self._tl_vel) > 0.5
@@ -1652,14 +1671,28 @@ class App:
         n = self._art_count
         if n <= 1:
             return
+        alpha = int(self._art_dots_a)
+        if alpha <= 2:
+            return
         r   = max(2, W // 200)
         gap = r * 4
         total_w = gap * (n - 1)
         cx0 = W // 2 - total_w // 2
         cy  = ay + H - max(16, H // 32)
+
+        # Pill-shaped translucent backdrop — plain dots wash out on light covers.
+        pad_x, pad_y = r * 3, int(r * 1.6)
+        pill_w = total_w + r * 2 + pad_x * 2
+        pill_h = r * 2 + pad_y * 2
+        pill = pygame.Surface((pill_w, pill_h), pygame.SRCALPHA)
+        pygame.draw.rect(pill, (0, 0, 0, int(120 * alpha / 255)),
+                          (0, 0, pill_w, pill_h), border_radius=pill_h // 2)
+        self.screen.blit(pill, (W // 2 - pill_w // 2, cy - pill_h // 2))
+
         cur = int(round(self._art_pos))
         for i in range(n):
-            c = (235, 235, 235) if i == cur else (110, 110, 110)
+            base = (235, 235, 235) if i == cur else (110, 110, 110)
+            c = (*base, alpha)
             pygame.gfxdraw.filled_circle(self.screen, cx0 + i * gap, cy, r, c)
             pygame.gfxdraw.aacircle(self.screen, cx0 + i * gap, cy, r, c)
 
