@@ -60,6 +60,9 @@ _SPREAD_RATIO = 1.5
 _STORE_MAX_PX = 1000
 # Cap releases inspected per album so a huge release group can't stall forever.
 _MAX_RELEASES = 12
+# Prefer English/Norwegian-market pressings (right script, expected artwork).
+# UK == GB; XE = Europe-wide, XW = Worldwide.
+_PREFERRED_COUNTRIES = {"US", "GB", "CA", "XE", "XW", "NO"}
 
 
 def _md5(s: str) -> str:
@@ -203,40 +206,61 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 return cand
         return "Other"
 
-    def _release_ids(self, artist: str, album: str, track_count: int) -> list[str]:
-        """Return release MBIDs for the album, best-matching pressings first."""
-        # Escape Lucene-special double quotes in the query terms, and strip
-        # streaming-title edition suffixes that MusicBrainz doesn't carry.
+    def _pick_release_group(self, artist: str, album: str) -> str:
+        """Return the best-matching release-group MBID, or ''.
+
+        Album titles like "Paranoid" match both the studio album *and* a
+        same-named single/live/remix release group, often all at score 100 —
+        so we can't just take the first hit.  Prefer a plain studio Album
+        (primary-type Album, no Live/Remix/Compilation secondary types), then
+        score, then the earliest release (the original edition).
+        """
         qa = artist.replace('"', " ").strip()
         ql = _clean_album_name(album).replace('"', " ").strip()
-        data = self._mb_get(
-            "release-group",
-            query=f'artist:"{qa}" AND releasegroup:"{ql}"',
-            limit=5,
-        )
-        groups = data.get("release-groups", [])
+        data = self._mb_get("release-group",
+                            query=f'artist:"{qa}" AND releasegroup:"{ql}"', limit=10)
+        groups = [g for g in data.get("release-groups", [])
+                  if int(g.get("score", 0)) >= 85]
         if not groups:
+            log.info("artwork: no MB match for %s - %s", artist, ql)
+            return ""
+
+        def rank(g: dict):
+            secondary = g.get("secondary-types") or []
+            return (
+                0 if g.get("primary-type") == "Album" else 1,
+                len(secondary),                          # studio > live/remix/comp
+                -int(g.get("score", 0)),
+                g.get("first-release-date") or "9999",   # original edition first
+            )
+
+        best = min(groups, key=rank)
+        sec = best.get("secondary-types") or []
+        log.info("artwork: MB group %s (%s%s) for %s - %s",
+                 best["id"][:8], best.get("primary-type"),
+                 "/" + ",".join(sec) if sec else "", artist, ql)
+        return best["id"]
+
+    def _release_ids(self, artist: str, album: str, track_count: int) -> list[str]:
+        """Return release MBIDs for the album, best-matching pressings first:
+        preferred-country and track-count-matching editions lead."""
+        rg_id = self._pick_release_group(artist, album)
+        if not rg_id:
             return []
-        # Highest-scoring group wins; ignore weak fuzzy matches.
-        best = groups[0]
-        if int(best.get("score", 0)) < 85:
-            log.info("artwork: weak MB match for %s - %s (score %s) — skipping",
-                     artist, album, best.get("score"))
-            return []
-        rg_id = best["id"]
         rel_data = self._mb_get("release", **{"release-group": rg_id,
-                                              "limit": 50, "inc": "media"})
+                                              "limit": 100, "inc": "media"})
         releases = rel_data.get("releases", [])
 
         def track_total(rel: dict) -> int:
             return sum(m.get("track-count", 0) for m in rel.get("media", []))
 
-        # Prefer pressings whose track count matches the album we actually have,
-        # so booklet/back scans line up with the right edition.
         def sort_key(rel: dict):
+            country = rel.get("country") or ""
             tt = track_total(rel)
-            matches = (track_count > 0 and tt == track_count)
-            return (0 if matches else 1, abs(tt - track_count) if track_count else 0)
+            country_rank = (0 if country in _PREFERRED_COUNTRIES
+                            else 1 if country == "" else 2)
+            tc_match = 0 if (track_count > 0 and tt == track_count) else 1
+            return (country_rank, tc_match, abs(tt - track_count) if track_count else 0)
 
         releases.sort(key=sort_key)
         return [r["id"] for r in releases[:_MAX_RELEASES]]
@@ -277,12 +301,6 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                     by_type.setdefault(ntype, []).append(ref)
             if rel_booklet:
                 booklets[rel_id] = rel_booklet
-            # Early exit: once we have a back and a booklet set, stop scanning
-            # more pressings (avoids dozens of CAA calls on huge release groups).
-            have_back = "Back" not in want or by_type.get("Back")
-            have_booklet = "Booklet" not in want or booklets
-            if have_back and have_booklet:
-                break
 
         result: list[ArtRef] = []
         # One best Front/Back etc.: prefer approved.
@@ -416,13 +434,10 @@ class ArtworkFetcher:
         d = self._album_dir(album_uri)
         os.makedirs(d, exist_ok=True)
 
-        seen_hashes: set[str] = set()
-        manifest: list[dict] = []
-        seq = 0
-
-        # Stable order: Front, Back, Booklet(page order), then the rest.
+        # Download everything first (exact-byte dedup for identical listings).
         refs.sort(key=lambda r: (_TYPE_ORDER.get(r.type, 8), r.order))
-
+        seen_hashes: set[str] = set()
+        downloaded: list[tuple[ArtRef, Image.Image]] = []
         for ref in refs:
             raw = self._download(ref.url)
             if not raw:
@@ -432,31 +447,71 @@ class ArtworkFetcher:
                 continue
             seen_hashes.add(h)
             try:
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                downloaded.append((ref, Image.open(io.BytesIO(raw)).convert("RGB")))
             except Exception:
                 continue
-            # Split a two-page booklet spread into single pages.
-            pages = self._split_spread(img) if ref.type in ("Booklet", "Other") else [img]
-            for page in pages:
-                page = self._downscale(page)
-                seq += 1
-                fname = f"{seq:02d}_{ref.type.lower()}.jpg"
-                fpath = os.path.join(d, fname)
+
+        # A booklet can arrive two ways: individual square page scans, or one
+        # whole-pamphlet strip (all pages in a single wide/tall image).  Some
+        # releases carry *both*; they're the same content at different
+        # resolutions, so a byte/pixel hash can't pair them.  Instead: split
+        # any strip into pages and keep whichever representation is more
+        # complete — ties favour the individual scans (higher quality).
+        booklet_indiv: list[tuple[ArtRef, Image.Image]] = []
+        booklet_strip: list[tuple[ArtRef, Image.Image]] = []
+        others:        list[tuple[ArtRef, Image.Image]] = []
+        for ref, img in downloaded:
+            if ref.type == "Booklet":
+                pages = self._split_spread(img)
+                if len(pages) > 1:
+                    booklet_strip += [(ref, p) for p in pages]
+                else:
+                    booklet_indiv.append((ref, img))
+            else:
+                others.append((ref, img))
+
+        if len(booklet_indiv) >= len(booklet_strip):
+            chosen = booklet_indiv
+            if booklet_strip:
+                log.info("artwork: %s - %s: kept %d individual booklet scans, "
+                         "dropped %d strip page(s)", artist, album,
+                         len(booklet_indiv), len(booklet_strip))
+        else:
+            chosen = booklet_strip
+            if booklet_indiv:
+                log.info("artwork: %s - %s: kept %d strip pages, dropped %d "
+                         "individual scan(s)", artist, album,
+                         len(booklet_strip), len(booklet_indiv))
+
+        # Assemble in display order: Back etc. by type, then booklet in order.
+        ordered: list[tuple[tuple, ArtRef, Image.Image]] = []
+        for ref, img in others:
+            ordered.append(((_TYPE_ORDER.get(ref.type, 8), ref.order, 0), ref, img))
+        for i, (ref, img) in enumerate(chosen):
+            ordered.append(((_TYPE_ORDER.get("Booklet", 2), ref.order, i), ref, img))
+        ordered.sort(key=lambda t: t[0])
+
+        manifest: list[dict] = []
+        seq = 0
+        for _, ref, img in ordered:
+            img = self._downscale(img)
+            seq += 1
+            fname = f"{seq:02d}_{ref.type.lower()}.jpg"
+            fpath = os.path.join(d, fname)
+            try:
+                img.save(fpath, "JPEG", quality=88)
+            except Exception as e:
+                log.debug("artwork: save %s failed: %s", fname, e)
+                continue
+            manifest.append({"file": fname, "type": ref.type, "source": ref.source})
+            # Persist incrementally (usable/resumable if interrupted) and let
+            # the caller show the page as it lands.
+            self._write_manifest(d, manifest)
+            if on_image:
                 try:
-                    page.save(fpath, "JPEG", quality=88)
-                except Exception as e:
-                    log.debug("artwork: save %s failed: %s", fname, e)
-                    continue
-                manifest.append({"file": fname, "type": ref.type, "source": ref.source})
-                # Persist the manifest incrementally so a fetch interrupted
-                # partway through still leaves a usable (and resumable) set,
-                # and notify the caller so the UI can show the page now.
-                self._write_manifest(d, manifest)
-                if on_image:
-                    try:
-                        on_image(fpath)
-                    except Exception:
-                        pass
+                    on_image(fpath)
+                except Exception:
+                    pass
 
         # Final manifest (possibly empty = sentinel) and mark done.
         self._write_manifest(d, manifest)
