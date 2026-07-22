@@ -89,6 +89,19 @@ def _md5(s: str) -> str:
     return hashlib.md5(s.encode()).hexdigest()
 
 
+def _media_format(media: list[dict]) -> str:
+    """Human-readable format label from a release's media list, e.g. "CD",
+    "2×Vinyl", "CD+DVD" — for the manual release picker."""
+    formats = [m.get("format") for m in media if m.get("format")]
+    if not formats:
+        return ""
+    uniq = list(dict.fromkeys(formats))   # dedupe, keep first-seen order
+    if len(uniq) == 1:
+        n = len(formats)
+        return uniq[0] if n == 1 else f"{n}×{uniq[0]}"
+    return "+".join(uniq)
+
+
 # Edition/format qualifiers that appear in streaming album titles but not in
 # MusicBrainz release-group titles — stripped before searching.
 _EDITION_KW = ("remaster", "deluxe", "expanded", "edition", "anniversary",
@@ -345,13 +358,14 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         return [{"id": r["id"], "country": r.get("country") or "",
                  "title": r.get("title") or album,
                  "disambiguation": r.get("disambiguation") or "",
-                 "date": r.get("date") or ""}
+                 "date": r.get("date") or "",
+                 "format": _media_format(r.get("media", []))}
                 for r in releases[:_MAX_RELEASES]]
 
     def collect(self, artist: str, album: str, track_count: int,
                 types: tuple[str, ...], year: int = 0) -> list[dict]:
         """Return one candidate per release: {release_id, country, title,
-        disambiguation, date, refs}.
+        disambiguation, date, format, refs}.
 
         Art is never aggregated across releases — the caller (or the user, via
         the manual picker) chooses a single release — so each candidate keeps
@@ -390,7 +404,8 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 candidates.append({"release_id": rel_id, "country": rel["country"],
                                    "title": rel["title"],
                                    "disambiguation": rel["disambiguation"],
-                                   "date": rel["date"], "refs": refs})
+                                   "date": rel["date"], "format": rel.get("format", ""),
+                                   "refs": refs})
         return candidates
 
 
@@ -513,9 +528,10 @@ class ArtworkFetcher:
         """Enumerate candidate releases for a manual picker.
 
         Each candidate is {release_id, country, title, disambiguation, date,
-        refs} — the same data the automatic picker uses to choose a release,
-        so a UI can list them (name / region / picture count) and let the
-        user override the automatic choice. Downloads no image bytes.
+        format, refs} — the same data the automatic picker uses to choose a
+        release, so a UI can list them (name / region / format / picture
+        count) and let the user override the automatic choice. Downloads no
+        image bytes.
         """
         candidates: list[dict] = []
         for provider in self._providers:

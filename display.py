@@ -3800,12 +3800,13 @@ class App:
         pygame.draw.rect(self.screen, COL_CELL_BG, (px, py, pw, ph), border_radius=10)
         pygame.draw.rect(self.screen, COL_SEP,     (px, py, pw, ph), width=1, border_radius=10)
 
+        # Same plain-X style as the Settings back button (no circle backdrop).
         cx, cy, r = self._release_picker_close_pos()
-        pygame.gfxdraw.filled_circle(self.screen, cx, cy, r, (45, 45, 52))
-        pygame.gfxdraw.aacircle(self.screen, cx, cy, r, (75, 75, 84))
-        d = max(1, r * 11 // 16)
-        pygame.draw.aaline(self.screen, COL_TRACK_NORMAL, (cx - d, cy - d), (cx + d, cy + d))
-        pygame.draw.aaline(self.screen, COL_TRACK_NORMAL, (cx - d, cy + d), (cx + d, cy - d))
+        d = max(1, r * 11 // 32)
+        pygame.draw.aaline(self.screen, COL_HIGHLIGHT, (cx - d, cy - d), (cx + d, cy + d))
+        pygame.draw.aaline(self.screen, COL_HIGHLIGHT, (cx - d + 1, cy - d), (cx + d + 1, cy + d))
+        pygame.draw.aaline(self.screen, COL_HIGHLIGHT, (cx + d, cy - d), (cx - d, cy + d))
+        pygame.draw.aaline(self.screen, COL_HIGHLIGHT, (cx + d + 1, cy - d), (cx - d + 1, cy + d))
 
         if cands == "loading":
             # Size/position from the max-dots variant so the text doesn't
@@ -3842,7 +3843,9 @@ class App:
                 title_txt = f"{title_txt} ({disamb})"
             n       = len(cand.get("refs", []))
             country = cand.get("country") or "??"
-            sub_txt = f"{country} · {n} picture{'s' if n != 1 else ''}"
+            fmt     = cand.get("format") or ""
+            parts   = [country] + ([fmt] if fmt else []) + [f"{n} picture{'s' if n != 1 else ''}"]
+            sub_txt = " · ".join(parts)
 
             t1 = _render_text(self._f_track, title_txt, COL_TRACK_NORMAL, pw - BTN_MARGIN * 2)
             self.screen.blit(t1, (px + BTN_MARGIN, ry + 6))
