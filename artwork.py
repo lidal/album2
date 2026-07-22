@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -525,8 +526,10 @@ class ArtworkFetcher:
     @staticmethod
     def _write_manifest(album_dir: str, manifest: list[dict]):
         try:
-            tmp = os.path.join(album_dir, "manifest.json.tmp")
-            with open(tmp, "w") as f:
+            # Unique temp name: two fetches of the same album (e.g. a bulk run
+            # and the user opening it) must not race on one .tmp file.
+            fd, tmp = tempfile.mkstemp(dir=album_dir, prefix=".manifest.", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
                 json.dump(manifest, f)
             os.replace(tmp, os.path.join(album_dir, "manifest.json"))
         except Exception as e:
