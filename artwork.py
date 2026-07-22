@@ -17,11 +17,12 @@ Wide booklet spreads (two facing pages in one scan) are split down the middle
 so each page fills the square screen on its own.
 
 API etiquette:
-  * MusicBrainz WS/2 asks for <= 1 request/second and a descriptive
-    User-Agent with contact info — both enforced here by a shared limiter.
-  * The Cover Art Archive / archive.org has no published rate limit but is a
-    donated service; we still pace requests and retry gently on the slow
-    archive.org redirects.
+  * MusicBrainz WS/2 enforces ~1 request/second per IP (HTTP 503 otherwise)
+    and requires a descriptive User-Agent with contact info — both handled
+    here by a shared limiter and the session header.
+  * The Cover Art Archive (coverartarchive.org) has no rate limit, so its
+    listing and image requests are not throttled; we only retry gently on the
+    slow/occasionally-failing archive.org image redirects.
 """
 from __future__ import annotations
 
@@ -83,9 +84,8 @@ class _RateLimiter:
             self._last = time.monotonic()
 
 
-# Shared across all instances/threads — the limits are per external service.
-_mb_limiter = _RateLimiter(1.1)    # MusicBrainz: <= 1 req/s
-_caa_limiter = _RateLimiter(0.34)  # Cover Art Archive / archive.org: be gentle
+# MusicBrainz enforces ~1 req/s per IP; the Cover Art Archive has no limit.
+_mb_limiter = _RateLimiter(1.1)
 
 
 # ── data model ────────────────────────────────────────────────────────────────
@@ -148,7 +148,6 @@ class MusicBrainzCAAProvider(ArtworkProvider):
             return {}
 
     def _caa_get(self, entity: str, mbid: str) -> dict:
-        _caa_limiter.wait()
         for attempt in range(2):
             try:
                 r = self._s.get(f"{self._CAA}/{entity}/{mbid}", timeout=15)
@@ -451,7 +450,6 @@ class ArtworkFetcher:
             log.warning("artwork: manifest save failed: %s", e)
 
     def _download(self, url: str) -> bytes | None:
-        _caa_limiter.wait()
         for attempt in range(3):
             try:
                 r = self._session.get(url, timeout=25)
