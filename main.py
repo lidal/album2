@@ -103,15 +103,19 @@ def main():
     _t_last_flip = None   # for slow-frame diagnosis (see below)
 
     while running:
+        t_loop_top = time.perf_counter()
+        n_events = 0
         for event in pygame.event.get():
+            n_events += 1
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
             else:
                 display.handle_event(event)
+        t_ev = time.perf_counter()
 
-        t0 = time.perf_counter()
+        t0 = t_ev
         display.update()
         t1 = time.perf_counter()
         fps = display.target_fps()
@@ -134,15 +138,22 @@ def main():
         if drew:
             # Flag individual slow frames (missed the 60fps budget by 2x+) —
             # the periodic summary below averages over 200 frames and can
-            # hide an occasional stutter entirely.
+            # hide an occasional stutter entirely. Splits out event-draining
+            # time and the gap since the *previous loop iteration started*
+            # (not just since the last flip) to localize where the time goes:
+            # scheduling delay before we even reach event processing, a flood
+            # of queued touch events, or the update/draw/flip stages proper.
             if _t_last_flip is not None:
                 gap_ms = (t3 - _t_last_flip) * 1000
                 if gap_ms > 33.0:
                     log.warning(
-                        "slow frame: gap=%.1fms  update=%.1fms  draw=%.1fms  "
+                        "slow frame: gap=%.1fms  since_last_iter=%.1fms  "
+                        "events=%.1fms(n=%d)  update=%.1fms  draw=%.1fms  "
                         "flip=%.1fms  (rgb565=%.1fms  mmap-wait=%.1fms)  "
                         "view=%s peeking=%s dragging=%s",
-                        gap_ms, (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
+                        gap_ms, (t_loop_top - _t_last_flip) * 1000,
+                        (t_ev - t_loop_top) * 1000, n_events,
+                        (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
                         (fb.t_rgb565 * 1000) if fb else 0.0,
                         ((t3 - t2) - (fb.t_rgb565 if fb else 0.0)) * 1000,
                         display._view.name, display._peeking, display._panel_touch,
