@@ -1372,6 +1372,8 @@ class App:
         # ── layer 5: always-on-top ────────────────────────────────────────────
         self._draw_progress()
         self._draw_volume_badge()
+        self._draw_release_status()
+        self._draw_menu_toast()
         if settings.get("debug"):
             self._draw_debug_overlays()
         return True
@@ -1719,13 +1721,16 @@ class App:
             pygame.gfxdraw.filled_circle(self.screen, cx0 + i * gap, cy, r, c)
             pygame.gfxdraw.aacircle(self.screen, cx0 + i * gap, cy, r, c)
 
-    def _draw_spinner(self, cx: int, cy: int):
+    def _draw_spinner(self, cx: int, cy: int, radius: int | None = None):
         t     = pygame.time.get_ticks() / 1000.0
-        r     = W // 9
+        r     = radius if radius is not None else W // 9
         n     = 8
-        dot_r = max(4, W // 55)
+        dot_r = max(2, round(r / 6.1))
         for i in range(n):
-            angle = math.pi * 2 * i / n - t * 4
+            # Brightness rises with i, so the +t*4 (clockwise) sweep is needed
+            # to keep the bright head leading the fade — with -t*4 the bright
+            # dot trailed behind, reading as spinning the wrong way.
+            angle = math.pi * 2 * i / n + t * 4
             ax = cx + int(r * math.cos(angle))
             ay = cy + int(r * math.sin(angle))
             brightness = int(60 + 180 * (i + 1) / n)
@@ -1843,8 +1848,6 @@ class App:
             self._draw_album_menu()
         if self._art_release_picker is not None:
             self._draw_release_picker()
-        self._draw_release_status()
-        self._draw_menu_toast()
 
     # ── draw: tracklist ───────────────────────────────────────────────────────
 
@@ -3779,11 +3782,18 @@ class App:
         pygame.draw.rect(self.screen, COL_CELL_BG, (px, py, pw, ph), border_radius=10)
         pygame.draw.rect(self.screen, COL_SEP,     (px, py, pw, ph), width=1, border_radius=10)
 
+        cx, cy, r = self._release_picker_close_pos()
+        pygame.gfxdraw.filled_circle(self.screen, cx, cy, r, (45, 45, 52))
+        pygame.gfxdraw.aacircle(self.screen, cx, cy, r, (75, 75, 84))
+        d = max(1, r * 11 // 16)
+        pygame.draw.aaline(self.screen, COL_TRACK_NORMAL, (cx - d, cy - d), (cx + d, cy + d))
+        pygame.draw.aaline(self.screen, COL_TRACK_NORMAL, (cx - d, cy + d), (cx + d, cy - d))
+
         if cands == "loading":
             dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
             ts = _render_text(self._f_track, "Loading releases" + dots, COL_TEXT_ALBUM)
-            self.screen.blit(ts, (px + (pw - ts.get_width()) // 2, py + ph // 2 - 60))
-            self._draw_spinner(px + pw // 2, py + ph // 2 + 20)
+            self.screen.blit(ts, (px + (pw - ts.get_width()) // 2, py + ph // 2 - 90))
+            self._draw_spinner(px + pw // 2, py + ph // 2 + 30, radius=36)
             return
 
         header_h  = TRACK_ROW_H
@@ -3795,7 +3805,7 @@ class App:
 
         title = f"Choose a release ({len(cands)})" if not overflow else \
                 f"Choose a release ({len(shown)} of {len(cands)}, best shown)"
-        ts = _render_text(self._f_track_sm, title, COL_TEXT_ALBUM, pw - BTN_MARGIN * 2)
+        ts = _render_text(self._f_track_sm, title, COL_TEXT_ALBUM, pw - BTN_MARGIN * 2 - r * 3)
         self.screen.blit(ts, (px + (pw - ts.get_width()) // 2,
                               py + (header_h - ts.get_height()) // 2))
         pygame.draw.line(self.screen, COL_SEP, (px, py + header_h - 1), (px + pw, py + header_h - 1))
@@ -3825,6 +3835,16 @@ class App:
         px, py, pw, ph = self._release_picker_rect()
         return px <= pos[0] < px + pw and py <= pos[1] < py + ph
 
+    def _release_picker_close_pos(self):
+        px, py, pw, ph = self._release_picker_rect()
+        r = TRACK_ROW_H // 3
+        return px + pw - r - 16, py + r + 14, r
+
+    def _release_picker_close_hit(self, pos) -> bool:
+        cx, cy, r = self._release_picker_close_pos()
+        dx, dy = pos[0] - cx, pos[1] - cy
+        return dx * dx + dy * dy <= (r + 10) ** 2
+
     def _release_picker_item_at(self, pos) -> dict | None:
         cands = self._art_release_picker
         if not isinstance(cands, list) or not cands:
@@ -3841,6 +3861,14 @@ class App:
     def _open_release_picker(self):
         if self._cur_idx is None:
             return
+        album_uri = self._art_album_uri
+        if not album_uri or album_uri in self._art_fetching:
+            # An automatic or manual fetch for this album is already running —
+            # starting a second MB/CAA pass concurrently on top of it is what
+            # caused the Pi to run out of memory and hard-reset (watchdog).
+            self._show_menu_toast("Already fetching art for this album")
+            return
+        self._art_fetching.add(album_uri)
         album = self._albums[self._cur_idx]
         artist = album.get("artist", "")
         name   = album.get("name", "")
@@ -3851,12 +3879,14 @@ class App:
         self._art_release_picker = "loading"
         self._dirty = True
 
-        def _bg(artist=artist, name=name, track_count=track_count, gen=gen):
+        def _bg(artist=artist, name=name, track_count=track_count, gen=gen, album_uri=album_uri):
             try:
                 cands = self._artwork.list_candidates(artist, name, track_count)
             except Exception as e:
                 log.warning("release picker: list failed for %s - %s: %s", artist, name, e)
                 cands = []
+            finally:
+                self._art_fetching.discard(album_uri)
             if self._art_release_gen != gen:
                 return   # superseded by a newer request, or dismissed
             if cands:
@@ -3872,6 +3902,7 @@ class App:
         self._art_release_gen   += 1   # invalidate any still-in-flight listing
         album_uri = self._art_album_uri
         if not album_uri or album_uri in self._art_fetching:
+            self._show_menu_toast("Already fetching art for this album")
             return
         self._art_fetching.add(album_uri)
         self._art_release_downloading = True
@@ -3973,12 +4004,19 @@ class App:
 
     # ── menu toast (small transient confirmation) ───────────────────────────────
 
-    def _pill_surface(self, text: str, alpha: int = 255) -> pygame.Surface:
+    def _pill_surface(self, text: str, alpha: int = 255,
+                      reserve_text: str | None = None) -> pygame.Surface:
         """A small rounded, semi-transparent label — used for the fading
-        confirmation toast and the persistent download-progress status."""
+        confirmation toast and the persistent download-progress status.
+
+        *reserve_text*, if given, sizes the pill for that (longer) string
+        instead of *text* — so animated trailing dots don't grow/shrink the
+        pill (and shift its centered position) every frame.
+        """
         text_s = _render_text(self._f_track, text, (235, 235, 235))
+        ref_s  = _render_text(self._f_track, reserve_text, (235, 235, 235)) if reserve_text else text_s
         pad_x, pad_y = 22, 12
-        pw, ph = text_s.get_width() + pad_x * 2, text_s.get_height() + pad_y * 2
+        pw, ph = ref_s.get_width() + pad_x * 2, ref_s.get_height() + pad_y * 2
         surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
         pygame.draw.rect(surf, (20, 20, 26, int(210 * alpha / 255)), (0, 0, pw, ph),
                          border_radius=ph // 2)
@@ -4011,8 +4049,9 @@ class App:
         the release picker itself shows the "loading releases" spinner."""
         if not self._art_release_downloading:
             return
+        base = "Downloading album art"
         dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
-        surf = self._pill_surface("Downloading album art" + dots)
+        surf = self._pill_surface(base + dots, reserve_text=base + "...")
         self.screen.blit(surf, ((W - surf.get_width()) // 2,
                                 H - PROGRESS_H - surf.get_height() - 28))
 
@@ -4426,7 +4465,10 @@ class App:
 
                 # release-picker row selection (topmost overlay when open)
                 if self._art_release_picker is not None:
-                    if self._release_picker_hit(pos):
+                    if self._release_picker_close_hit(pos):
+                        self._art_release_picker = None
+                        self._art_release_gen   += 1   # invalidate an in-flight listing
+                    elif self._release_picker_hit(pos):
                         cand = self._release_picker_item_at(pos)
                         if cand is not None:
                             self._pick_release_from_picker(cand)

@@ -310,8 +310,14 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 if ntype not in want:
                     continue
                 thumbs = img.get("thumbnails", {}) or {}
+                # Prefer thumbnails over the full original scan — CAA originals
+                # can be tens of megapixels, and decoding one in Pillow on a
+                # memory-constrained device (Pi Zero 2W, ~256MB free) risks an
+                # OOM/thrash bad enough to trip the hardware watchdog. We
+                # downscale to _STORE_MAX_PX on save anyway, so even the small
+                # 250px thumbnail beats the original as a fallback.
                 url = (thumbs.get("1200") or thumbs.get("500")
-                       or img.get("image") or thumbs.get("250"))
+                       or thumbs.get("250") or img.get("image"))
                 if not url:
                     continue
                 refs.append(ArtRef(type=ntype, url=url, source=self.id,
