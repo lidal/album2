@@ -351,7 +351,7 @@ class App:
         # Prepared 720² surfaces for extra pages, keyed by (album_uri, idx).
         self._art_page_surf: collections.OrderedDict[tuple, pygame.Surface] = \
             collections.OrderedDict()
-        self._ART_PAGE_MAX = 5                # keep a small window in memory
+        self._ART_PAGE_MAX = 7                # keep a small window in memory
         self._palette_col: dict[str, tuple] = {}        # uri → (bg, accent)
         self._tl_bg_cur:  list  = list(COL_TL_BG)      # current (animated) tl bg colour
         self._tl_bg_t:    tuple = COL_TL_BG             # target tl bg colour
@@ -870,7 +870,7 @@ class App:
     def _ensure_art_window(self):
         """Prepare surfaces for the current index ±1 in a background thread,
         and evict pages outside a small window to bound memory."""
-        want = {i for i in (self._art_idx - 1, self._art_idx, self._art_idx + 1)
+        want = {i for i in range(self._art_idx - 2, self._art_idx + 3)
                 if 1 <= i < self._art_count}
         # Bound memory: LRU-evict the least-recently-used prepared pages.
         while len(self._art_page_surf) > self._ART_PAGE_MAX:
@@ -908,6 +908,23 @@ class App:
         threading.Thread(target=_bg, daemon=True).start()
 
     @staticmethod
+    def _blurred_bg(img: Image.Image) -> Image.Image:
+        """A darkened, blurred, screen-filling background from *img*.
+
+        Blurs a quarter-size copy (cheap) and upscales — visually the same as a
+        big-radius blur of the full image but far faster on the Pi.
+        """
+        iw, ih = img.size
+        cover = max(W / iw, H / ih) / 4.0
+        bw, bh = max(1, round(iw * cover)), max(1, round(ih * cover))
+        small = img.resize((bw, bh), Image.BILINEAR)
+        qw, qh = W // 4, H // 4
+        sx, sy = max(0, (bw - qw) // 2), max(0, (bh - qh) // 2)
+        small = small.crop((sx, sy, sx + qw, sy + qh)).filter(ImageFilter.GaussianBlur(6))
+        bg = small.resize((W, H), Image.BILINEAR)
+        return Image.eval(bg, lambda p: int(p * 0.45))
+
+    @staticmethod
     def _fit_art_surface(img: Image.Image, mode: str = "contain") -> pygame.Surface:
         """Fit *img* into the W×H square.
 
@@ -917,30 +934,23 @@ class App:
         fills the screen.
         """
         iw, ih = img.size
-        # Background: cover-scale then blur + darken (used when the sharp image
-        # doesn't fully cover the square).
-        cover = max(W / iw, H / ih)
-        bg = img.resize((max(1, int(iw * cover)), max(1, int(ih * cover))), Image.LANCZOS)
-        bx = (bg.width - W) // 2
-        by = (bg.height - H) // 2
-        bg = bg.crop((bx, by, bx + W, by + H)).filter(ImageFilter.GaussianBlur(18))
-        bg = Image.eval(bg, lambda p: int(p * 0.45))
-
         if mode == "height":
-            scale = H / ih
-            fw = max(1, round(iw * scale))
+            fw = max(1, round(iw * (H / ih)))
             fg = img.resize((fw, H), Image.LANCZOS)
-            if fw >= W:
+            if fw >= W:                      # fills the screen — no background
                 x = (fw - W) // 2
                 return _pil_to_surf(fg.crop((x, 0, x + W, H)))
-            # Narrower than the screen after height-fill — centre on the bg.
+            bg = AlbumDisplay._blurred_bg(img)
             bg.paste(fg, ((W - fw) // 2, 0))
             return _pil_to_surf(bg)
 
-        # Foreground: contain-scale, centred.
+        # contain: whole image visible.
         contain = min(W / iw, H / ih)
-        fw, fh  = max(1, int(iw * contain)), max(1, int(ih * contain))
+        fw, fh  = max(1, round(iw * contain)), max(1, round(ih * contain))
         fg = img.resize((fw, fh), Image.LANCZOS)
+        if fw >= W and fh >= H:              # already covers — no background
+            return _pil_to_surf(fg)
+        bg = AlbumDisplay._blurred_bg(img)
         bg.paste(fg, ((W - fw) // 2, (H - fh) // 2))
         return _pil_to_surf(bg)
 
@@ -1618,10 +1628,14 @@ class App:
             self.screen.blit(self._default_bg, (0, ay))
             self._draw_spinner(W // 2, ay + H // 2)
             return
-        art0 = self._art or self._default_bg
-        # Carousel only in full ALBUM view; peek/tracklist strips show the front.
-        if self._view != View.ALBUM or (self._art_count <= 1 and self._art_pos == 0.0):
-            self.screen.blit(art0, (0, ay))
+        # Outside full ALBUM view (peek/tracklist strips) show whichever image
+        # the carousel is currently on — not always the front.
+        if self._view != View.ALBUM:
+            surf = self._art_surface(self._art_idx) or self._art or self._default_bg
+            self.screen.blit(surf, (0, ay))
+            return
+        if self._art_count <= 1 and self._art_pos == 0.0:
+            self.screen.blit(self._art or self._default_bg, (0, ay))
             return
         pos  = self._art_pos
         base = int(math.floor(pos))
