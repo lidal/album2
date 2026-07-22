@@ -101,6 +101,7 @@ def main():
     _pn = 0
     _pt_wall = time.perf_counter()
     _t_last_flip = None   # for slow-frame diagnosis (see below)
+    _prev_tick_ms = 0.0    # how long the *previous* iteration's clock.tick() blocked
 
     while running:
         t_loop_top = time.perf_counter()
@@ -147,15 +148,16 @@ def main():
                 gap_ms = (t3 - _t_last_flip) * 1000
                 if gap_ms > 33.0:
                     log.warning(
-                        "slow frame: gap=%.1fms  since_last_iter=%.1fms  "
-                        "events=%.1fms(n=%d)  update=%.1fms  draw=%.1fms  "
-                        "flip=%.1fms  (rgb565=%.1fms  mmap-wait=%.1fms)  "
-                        "view=%s peeking=%s dragging=%s",
-                        gap_ms, (t_loop_top - _t_last_flip) * 1000,
+                        "slow frame: gap=%.1fms  since_last_iter=%.1fms "
+                        "(prev_tick=%.1fms)  events=%.1fms(n=%d)  update=%.1fms  "
+                        "draw=%.1fms  flip=%.1fms  (rgb565=%.1fms  mmap-wait=%.1fms)  "
+                        "fps=%d paces_loop=%s  view=%s peeking=%s dragging=%s",
+                        gap_ms, (t_loop_top - _t_last_flip) * 1000, _prev_tick_ms,
                         (t_ev - t_loop_top) * 1000, n_events,
                         (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
                         (fb.t_rgb565 * 1000) if fb else 0.0,
                         ((t3 - t2) - (fb.t_rgb565 if fb else 0.0)) * 1000,
+                        fps, fb.paces_loop if fb else None,
                         display._view.name, display._peeking, display._panel_touch,
                     )
             _t_last_flip = t3
@@ -186,8 +188,13 @@ def main():
         # loop sleeps after the vsync to honour the lower rate.
         # fbdev path: target 58fps (1000/58=17ms → 58.8fps, just below 60Hz display
         # rate so the write never catches the scan — no rolling tear line).
-        if not (drew and fb and fb.paces_loop) or (drew and fps < 60):
+        _ticked = not (drew and fb and fb.paces_loop) or (drew and fps < 60)
+        if _ticked:
+            _t_tick0 = time.perf_counter()
             clock.tick(min(fps, 58) if drew else min(fps, 15))
+            _prev_tick_ms = (time.perf_counter() - _t_tick0) * 1000
+        else:
+            _prev_tick_ms = 0.0
 
     log.info("Shutting down")
     player.disconnect()
