@@ -408,6 +408,11 @@ class App:
         # None = closed | "loading" = fetching the candidate list | list[dict] = ready
         self._art_release_picker: object = None
         self._art_release_gen:    int  = 0     # invalidates stale "loading" results
+        # album_uris currently listing MB/CAA release candidates — separate from
+        # _art_fetching (which means "downloading image bytes") so the "Downloading
+        # album art..." status pill doesn't appear during the lightweight listing
+        # step; the release picker's own spinner covers that phase instead.
+        self._art_listing: set[str] = set()
         self._menu_toast:    str | None = None
         self._menu_toast_ms: int = 0
 
@@ -850,7 +855,7 @@ class App:
         if not allow_fetch:
             return
         # Not fetched yet — kick a background fetch keyed to this album.
-        if album_uri in self._art_fetching:
+        if album_uri in self._art_fetching or album_uri in self._art_listing:
             return
         self._art_fetching.add(album_uri)
         artist = album.get("artist", "")
@@ -3802,9 +3807,13 @@ class App:
         pygame.draw.aaline(self.screen, COL_TRACK_NORMAL, (cx - d, cy + d), (cx + d, cy - d))
 
         if cands == "loading":
-            dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
-            ts = _render_text(self._f_track, "Loading releases" + dots, COL_TEXT_ALBUM)
-            self.screen.blit(ts, (px + (pw - ts.get_width()) // 2, py + ph // 2 - 90))
+            # Size/position from the max-dots variant so the text doesn't
+            # shift horizontally as the dot count animates.
+            ref_ts = _render_text(self._f_track, "Loading releases...", COL_TEXT_ALBUM)
+            x0     = px + (pw - ref_ts.get_width()) // 2
+            dots   = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
+            ts     = _render_text(self._f_track, "Loading releases" + dots, COL_TEXT_ALBUM)
+            self.screen.blit(ts, (x0, py + ph // 2 - 90))
             self._draw_spinner(px + pw // 2, py + ph // 2 + 30, radius=36)
             return
 
@@ -3874,13 +3883,14 @@ class App:
         if self._cur_idx is None:
             return
         album_uri = self._art_album_uri
-        if not album_uri or album_uri in self._art_fetching:
-            # An automatic or manual fetch for this album is already running —
-            # starting a second MB/CAA pass concurrently on top of it is what
-            # caused the Pi to run out of memory and hard-reset (watchdog).
+        if not album_uri or album_uri in self._art_fetching or album_uri in self._art_listing:
+            # An automatic or manual fetch (or another listing) for this album
+            # is already running — starting a second MB/CAA pass concurrently
+            # on top of it is what caused the Pi to run out of memory and
+            # hard-reset (watchdog).
             self._show_menu_toast("Already fetching art for this album")
             return
-        self._art_fetching.add(album_uri)
+        self._art_listing.add(album_uri)
         album = self._albums[self._cur_idx]
         artist = album.get("artist", "")
         name   = album.get("name", "")
@@ -3898,7 +3908,7 @@ class App:
                 log.warning("release picker: list failed for %s - %s: %s", artist, name, e)
                 cands = []
             finally:
-                self._art_fetching.discard(album_uri)
+                self._art_listing.discard(album_uri)
             if self._art_release_gen != gen:
                 return   # superseded by a newer request, or dismissed
             if cands:
@@ -3913,7 +3923,7 @@ class App:
         self._art_release_picker = None
         self._art_release_gen   += 1   # invalidate any still-in-flight listing
         album_uri = self._art_album_uri
-        if not album_uri or album_uri in self._art_fetching:
+        if not album_uri or album_uri in self._art_fetching or album_uri in self._art_listing:
             self._show_menu_toast("Already fetching art for this album")
             return
         self._art_fetching.add(album_uri)
