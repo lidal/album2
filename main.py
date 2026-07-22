@@ -100,6 +100,7 @@ def main():
     _pt_update = _pt_draw = _pt_flip = _pt_rgb565 = 0.0
     _pn = 0
     _pt_wall = time.perf_counter()
+    _t_last_flip = None   # for slow-frame diagnosis (see below)
 
     while running:
         for event in pygame.event.get():
@@ -131,6 +132,23 @@ def main():
         t3 = time.perf_counter()
 
         if drew:
+            # Flag individual slow frames (missed the 60fps budget by 2x+) —
+            # the periodic summary below averages over 200 frames and can
+            # hide an occasional stutter entirely.
+            if _t_last_flip is not None:
+                gap_ms = (t3 - _t_last_flip) * 1000
+                if gap_ms > 33.0:
+                    log.warning(
+                        "slow frame: gap=%.1fms  update=%.1fms  draw=%.1fms  "
+                        "flip=%.1fms  (rgb565=%.1fms  mmap-wait=%.1fms)  "
+                        "view=%s peeking=%s dragging=%s",
+                        gap_ms, (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
+                        (fb.t_rgb565 * 1000) if fb else 0.0,
+                        ((t3 - t2) - (fb.t_rgb565 if fb else 0.0)) * 1000,
+                        display._view.name, display._peeking, display._panel_touch,
+                    )
+            _t_last_flip = t3
+
             _pt_update  += t1 - t0
             _pt_draw    += t2 - t1
             _pt_flip    += t3 - t2
