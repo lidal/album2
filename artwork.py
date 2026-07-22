@@ -223,11 +223,18 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         so we can't just take the first hit.  Prefer a plain studio Album
         (primary-type Album, no Live/Remix/Compilation secondary types), then
         score, then the earliest release (the original edition).
+
+        The title is matched as a bag of words, not an exact phrase: MB's
+        title/disambiguation split can put most of a locally-tagged name in
+        the *disambiguation* field (e.g. David Bowie's 1969 album is titled
+        just "David Bowie", with 'aka "Man of Words / Man of Music" then
+        "Space Oddity"' as disambiguation) — a phrase query against the title
+        alone would never match "David Bowie (aka Space Oddity)".
         """
         qa = artist.replace('"', " ").strip()
         ql = _clean_album_name(album).replace('"', " ").strip()
         data = self._mb_get("release-group",
-                            query=f'artist:"{qa}" AND releasegroup:"{ql}"', limit=10)
+                            query=f'artist:"{qa}" AND releasegroup:({ql})', limit=10)
         groups = [g for g in data.get("release-groups", [])
                   if int(g.get("score", 0)) >= 85]
         if not groups:
