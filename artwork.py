@@ -65,9 +65,21 @@ _PHASH_THRESH = 6
 _STORE_MAX_PX = 1000
 # Cap releases inspected per album so a huge release group can't stall forever.
 _MAX_RELEASES = 12
-# Prefer English/Norwegian-market pressings (right script, expected artwork).
-# UK == GB; XE = Europe-wide, XW = Worldwide.
-_PREFERRED_COUNTRIES = {"US", "GB", "CA", "XE", "XW", "NO"}
+# When several releases have art, download this many of the most promising and
+# keep the single best — never aggregate art across releases (that mixed
+# split/non-split scans of the same page and produced duplicates).
+_EVAL_RELEASES = 3
+# Resolution (longest edge, px) is the primary quality signal — a page need not
+# exceed the 720px screen, but should clear these bars.  "Good enough" res
+# beats "more pictures".
+_RES_GOOD = 480
+_RES_OK = 300
+# Country preference (tie-break only), in the order the user asked for.
+_COUNTRY_PRIORITY = {"NO": 0, "XE": 1, "GB": 2, "UK": 2, "US": 3, "CA": 4}
+
+
+def _country_priority(country: str | None) -> int:
+    return _COUNTRY_PRIORITY.get((country or "").upper(), 5)
 
 
 def _md5(s: str) -> str:
@@ -246,9 +258,10 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                  "/" + ",".join(sec) if sec else "", artist, ql)
         return best["id"]
 
-    def _release_ids(self, artist: str, album: str, track_count: int) -> list[str]:
-        """Return release MBIDs for the album, best-matching pressings first:
-        preferred-country and track-count-matching editions lead."""
+    def _release_ids(self, artist: str, album: str,
+                     track_count: int) -> list[tuple[str, str]]:
+        """Return (release MBID, country) for the album, best pressings first:
+        preferred-country then track-count-matching editions lead."""
         rg_id = self._pick_release_group(artist, album)
         if not rg_id:
             return []
@@ -260,63 +273,46 @@ class MusicBrainzCAAProvider(ArtworkProvider):
             return sum(m.get("track-count", 0) for m in rel.get("media", []))
 
         def sort_key(rel: dict):
-            country = rel.get("country") or ""
             tt = track_total(rel)
-            country_rank = (0 if country in _PREFERRED_COUNTRIES
-                            else 1 if country == "" else 2)
             tc_match = 0 if (track_count > 0 and tt == track_count) else 1
-            return (country_rank, tc_match, abs(tt - track_count) if track_count else 0)
+            return (_country_priority(rel.get("country")), tc_match,
+                    abs(tt - track_count) if track_count else 0)
 
         releases.sort(key=sort_key)
-        return [r["id"] for r in releases[:_MAX_RELEASES]]
+        return [(r["id"], r.get("country") or "") for r in releases[:_MAX_RELEASES]]
 
     def collect(self, artist: str, album: str, track_count: int,
-                types: tuple[str, ...]) -> list[ArtRef]:
+                types: tuple[str, ...]) -> list[dict]:
+        """Return one candidate per release: {release_id, country, refs}.
+
+        Art is never aggregated across releases — the caller picks a single
+        best release — so each candidate keeps that release's refs intact.
+        """
         want = set(types)
-        release_ids = self._release_ids(artist, album, track_count)
-        if not release_ids:
+        releases = self._release_ids(artist, album, track_count)
+        if not releases:
             return []
-
-        # Gather candidate images per type across all releases.
-        by_type: dict[str, list[ArtRef]] = {}
-        booklets: dict[str, list[ArtRef]] = {}   # release_id -> ordered booklet refs
-
-        for rel_id in release_ids:
+        candidates: list[dict] = []
+        for rel_id, country in releases:
             listing = self._caa_get("release", rel_id)
             images = listing.get("images", []) if listing else []
-            rel_booklet: list[ArtRef] = []
+            refs: list[ArtRef] = []
             for order, img in enumerate(images):
                 ntype = self._norm_type(img.get("types"),
                                         img.get("front", False),
                                         img.get("back", False))
                 if ntype not in want:
                     continue
-                # Prefer a sensibly-sized thumbnail over the full original
-                # (originals can be 20MB scans); fall back to the original.
                 thumbs = img.get("thumbnails", {}) or {}
                 url = (thumbs.get("1200") or thumbs.get("500")
                        or img.get("image") or thumbs.get("250"))
                 if not url:
                     continue
-                ref = ArtRef(type=ntype, url=url, source=self.id,
-                             approved=bool(img.get("approved")), order=order)
-                if ntype == "Booklet":
-                    rel_booklet.append(ref)
-                else:
-                    by_type.setdefault(ntype, []).append(ref)
-            if rel_booklet:
-                booklets[rel_id] = rel_booklet
-
-        result: list[ArtRef] = []
-        # One best Front/Back etc.: prefer approved.
-        for ntype, refs in by_type.items():
-            refs.sort(key=lambda r: (0 if r.approved else 1, r.order))
-            result.append(refs[0])
-        # Booklet: take the most complete single set (coherent edition).
-        if booklets:
-            best_set = max(booklets.values(), key=len)
-            result.extend(best_set)
-        return result
+                refs.append(ArtRef(type=ntype, url=url, source=self.id,
+                                   approved=bool(img.get("approved")), order=order))
+            if refs:
+                candidates.append({"release_id": rel_id, "country": country, "refs": refs})
+        return candidates
 
 
 # ── orchestrator ──────────────────────────────────────────────────────────────
@@ -429,105 +425,32 @@ class ArtworkFetcher:
 
     def _do_fetch(self, album_uri: str, artist: str, album: str,
                   track_count: int, on_image=None) -> list[str]:
-        refs: list[ArtRef] = []
+        candidates: list[dict] = []
         for provider in self._providers:
             try:
-                refs.extend(provider.collect(artist, album, track_count, self._types))
+                candidates.extend(provider.collect(artist, album, track_count, self._types))
             except Exception as e:
                 log.debug("artwork: provider %s failed: %s", provider.id, e)
 
         d = self._album_dir(album_uri)
         os.makedirs(d, exist_ok=True)
 
-        # Download everything first (exact-byte dedup for identical listings).
-        refs.sort(key=lambda r: (_TYPE_ORDER.get(r.type, 8), r.order))
-        seen_hashes: set[str] = set()
-        downloaded: list[tuple[ArtRef, Image.Image]] = []
-        for ref in refs:
-            raw = self._download(ref.url)
-            if not raw:
-                continue
-            h = hashlib.sha1(raw).hexdigest()
-            if h in seen_hashes:
-                continue
-            seen_hashes.add(h)
-            try:
-                downloaded.append((ref, Image.open(io.BytesIO(raw)).convert("RGB")))
-            except Exception:
-                continue
-
-        # A booklet can arrive two ways: individual square page scans, or one
-        # whole-pamphlet strip (all pages in a single wide/tall image).  Some
-        # releases carry *both*; they're the same content at different
-        # resolutions, so a byte/pixel hash can't pair them.  Instead: split
-        # any strip into pages and keep whichever representation is more
-        # complete — ties favour the individual scans (higher quality).
-        booklet_indiv: list[tuple[ArtRef, Image.Image]] = []
-        booklet_strip: list[tuple[ArtRef, Image.Image]] = []
-        others:        list[tuple[ArtRef, Image.Image]] = []
-        for ref, img in downloaded:
-            if ref.type == "Booklet":
-                pages = self._split_spread(img)
-                if len(pages) > 1:
-                    booklet_strip += [(ref, p) for p in pages]
-                else:
-                    booklet_indiv.append((ref, img))
-            else:
-                others.append((ref, img))
-
-        if len(booklet_indiv) >= len(booklet_strip):
-            chosen = booklet_indiv
-            if booklet_strip:
-                log.info("artwork: %s - %s: kept %d individual booklet scans, "
-                         "dropped %d strip page(s)", artist, album,
-                         len(booklet_indiv), len(booklet_strip))
-        else:
-            chosen = booklet_strip
-            if booklet_indiv:
-                log.info("artwork: %s - %s: kept %d strip pages, dropped %d "
-                         "individual scan(s)", artist, album,
-                         len(booklet_strip), len(booklet_indiv))
-
-        # Assemble candidate pages with a display-order key.
-        candidates: list[dict] = []
-        for ref, img in others:
-            candidates.append({"key": (_TYPE_ORDER.get(ref.type, 8), ref.order, 0),
-                               "ref": ref, "img": img})
-        for i, (ref, img) in enumerate(chosen):
-            candidates.append({"key": (_TYPE_ORDER.get("Booklet", 2), ref.order, i),
-                               "ref": ref, "img": img})
-
-        # Perceptual dedup: the same page is often uploaded as several separate
-        # scans (different bytes, so the exact hash misses them).  Keep the
-        # highest-resolution representative of each near-duplicate cluster.
-        for c in candidates:
-            c["phash"] = self._dhash(c["img"])
-            c["res"] = c["img"].size[0] * c["img"].size[1]
-        kept: list[dict] = []
-        for c in sorted(candidates, key=lambda c: -c["res"]):
-            if any(self._hamming(c["phash"], k["phash"]) <= _PHASH_THRESH for k in kept):
-                continue
-            kept.append(c)
-        dropped = len(candidates) - len(kept)
-        if dropped:
-            log.info("artwork: %s - %s: dropped %d duplicate page(s)",
-                     artist, album, dropped)
-        ordered = sorted(kept, key=lambda c: c["key"])
+        winner = self._pick_release(candidates, artist, album)
+        pages = self._release_pages(winner["refs"]) if winner else []
 
         manifest: list[dict] = []
         seq = 0
-        for c in ordered:
-            ref, img = c["ref"], c["img"]
+        for typ, source, img in pages:
             img = self._downscale(img)
             seq += 1
-            fname = f"{seq:02d}_{ref.type.lower()}.jpg"
+            fname = f"{seq:02d}_{typ.lower()}.jpg"
             fpath = os.path.join(d, fname)
             try:
                 img.save(fpath, "JPEG", quality=88)
             except Exception as e:
                 log.debug("artwork: save %s failed: %s", fname, e)
                 continue
-            manifest.append({"file": fname, "type": ref.type, "source": ref.source})
+            manifest.append({"file": fname, "type": typ, "source": source})
             # Persist incrementally (usable/resumable if interrupted) and let
             # the caller show the page as it lands.
             self._write_manifest(d, manifest)
@@ -545,6 +468,125 @@ class ArtworkFetcher:
 
         log.info("artwork: %s - %s → %d image(s)", artist, album, len(manifest))
         return [os.path.join(d, e["file"]) for e in manifest]
+
+    def _pick_release(self, candidates: list[dict], artist: str, album: str) -> dict | None:
+        """Choose the single best release.  Never aggregate across releases —
+        that mixed split/non-split scans of the same page.
+
+        Scored on: resolution tier first (a page need only clear ~480/300px,
+        not the 720 screen), then number of pages, then country preference.
+        Resolution + strip page-count come from a one-image header probe per
+        release (the -1200 thumbnail's real dimensions), so we never download
+        full art just to compare.  If probing fails, fall back to entry count.
+        """
+        if not candidates:
+            return None
+        # Preliminary rank: preferred country, then most entries.  With a
+        # single art-bearing release there's nothing to compare — use it.
+        candidates.sort(key=lambda c: (_country_priority(c["country"]), -len(c["refs"])))
+        if len(candidates) == 1:
+            return candidates[0]
+
+        best = None   # (score_tuple, candidate)
+        for cand in candidates[:_EVAL_RELEASES]:   # bounded — never probe them all
+            refs = cand["refs"]
+            country = cand["country"]
+            # Probe one representative image (prefer a booklet page).
+            sample = next((r for r in refs if r.type == "Booklet"), refs[0])
+            dims = self._probe_dims(sample.url)
+            if dims:
+                w, h = dims
+                ratio = max(w, h) / max(1, min(w, h))
+                if ratio >= _SPREAD_RATIO:          # whole-pamphlet strip
+                    n = max(2, round(ratio))
+                    page_long = max(w, h) / n
+                    est_pages = len(refs) * n
+                else:
+                    page_long = max(w, h)
+                    est_pages = len(refs)
+                tier = 2 if page_long >= _RES_GOOD else 1 if page_long >= _RES_OK else 0
+            else:
+                tier, est_pages = 1, len(refs)       # probe slow/failed → count only
+            score = (tier, est_pages, -_country_priority(country))
+            if best is None or score > best[0]:
+                best = (score, cand)
+        score, cand = best
+        log.info("artwork: %s - %s → release %s (%s): res-tier %d, ~%d pages",
+                 artist, album, cand["release_id"][:8], cand["country"] or "?",
+                 score[0], score[1])
+        return cand
+
+    def _release_pages(self, refs: list[ArtRef]) -> list[tuple[str, str, Image.Image]]:
+        """Download one release's art and return ordered (type, source, image)
+        pages: strips split, individual-vs-strip resolved, duplicates removed."""
+        refs = sorted(refs, key=lambda r: (_TYPE_ORDER.get(r.type, 8), r.order))
+        seen_hashes: set[str] = set()
+        downloaded: list[tuple[ArtRef, Image.Image]] = []
+        for ref in refs:
+            raw = self._download(ref.url)
+            if not raw:
+                continue
+            h = hashlib.sha1(raw).hexdigest()
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            try:
+                downloaded.append((ref, Image.open(io.BytesIO(raw)).convert("RGB")))
+            except Exception:
+                continue
+
+        # A booklet arrives as individual page scans or one whole-pamphlet
+        # strip (all pages in one wide/tall image); some releases carry both.
+        # Split any strip, then keep whichever representation has more pages
+        # (ties favour the individual scans — higher quality).
+        booklet_indiv: list[tuple[ArtRef, Image.Image]] = []
+        booklet_strip: list[tuple[ArtRef, Image.Image]] = []
+        others:        list[tuple[ArtRef, Image.Image]] = []
+        for ref, img in downloaded:
+            if ref.type == "Booklet":
+                split = self._split_spread(img)
+                if len(split) > 1:
+                    booklet_strip += [(ref, p) for p in split]
+                else:
+                    booklet_indiv.append((ref, img))
+            else:
+                others.append((ref, img))
+        chosen = booklet_indiv if len(booklet_indiv) >= len(booklet_strip) else booklet_strip
+
+        cands: list[dict] = []
+        for ref, img in others:
+            cands.append({"key": (_TYPE_ORDER.get(ref.type, 8), ref.order, 0),
+                          "ref": ref, "img": img})
+        for i, (ref, img) in enumerate(chosen):
+            cands.append({"key": (_TYPE_ORDER.get("Booklet", 2), ref.order, i),
+                          "ref": ref, "img": img})
+
+        # Perceptual dedup: the same page is often uploaded as several separate
+        # scans (different bytes, so an exact hash misses them).  Keep the
+        # highest-resolution representative of each near-duplicate cluster.
+        for c in cands:
+            c["phash"] = self._dhash(c["img"])
+            c["res"] = c["img"].size[0] * c["img"].size[1]
+        kept: list[dict] = []
+        for c in sorted(cands, key=lambda c: -c["res"]):
+            if any(self._hamming(c["phash"], k["phash"]) <= _PHASH_THRESH for k in kept):
+                continue
+            kept.append(c)
+        kept.sort(key=lambda c: c["key"])
+        return [(c["ref"].type, c["ref"].source, c["img"]) for c in kept]
+
+    def _probe_dims(self, url: str) -> tuple[int, int] | None:
+        """Read an image's real pixel dimensions from a 32KB ranged GET of its
+        header — enough to know aspect ratio and resolution without the full
+        download.  Returns (w, h) or None."""
+        try:
+            r = self._session.get(url, timeout=8,
+                                  headers={"Range": "bytes=0-32767"})
+            if r.status_code in (200, 206) and r.content:
+                return Image.open(io.BytesIO(r.content)).size
+        except Exception as e:
+            log.debug("artwork: dim probe failed for %s: %s", url[-40:], e)
+        return None
 
     @staticmethod
     def _write_manifest(album_dir: str, manifest: list[dict]):
