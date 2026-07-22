@@ -31,6 +31,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,6 +64,32 @@ _MAX_RELEASES = 12
 
 def _md5(s: str) -> str:
     return hashlib.md5(s.encode()).hexdigest()
+
+
+# Edition/format qualifiers that appear in streaming album titles but not in
+# MusicBrainz release-group titles — stripped before searching.
+_EDITION_KW = ("remaster", "deluxe", "expanded", "edition", "anniversary",
+               "reissue", "bonus", "mono", "stereo", "legacy", "collector",
+               "remastered", "super deluxe")
+_PAREN_RE = re.compile(r"[\(\[][^\(\)\[\]]*[\)\]]")
+_TAIL_RE = re.compile(
+    r"\s*-\s*[^-]*(remaster|deluxe|edition|reissue|mono|stereo|anniversary)[^-]*$",
+    re.I)
+
+
+def _clean_album_name(name: str) -> str:
+    """Strip edition/remaster qualifiers so the title matches MusicBrainz.
+
+    Only removes a parenthetical/bracketed group when it actually contains an
+    edition keyword, so real titles like "(What's the Story) Morning Glory?"
+    are preserved.
+    """
+    def _strip_group(m):
+        return "" if any(k in m.group(0).lower() for k in _EDITION_KW) else m.group(0)
+    cleaned = _PAREN_RE.sub(_strip_group, name)
+    cleaned = _TAIL_RE.sub("", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned or name
 
 
 # ── rate limiter ──────────────────────────────────────────────────────────────
@@ -178,9 +205,10 @@ class MusicBrainzCAAProvider(ArtworkProvider):
 
     def _release_ids(self, artist: str, album: str, track_count: int) -> list[str]:
         """Return release MBIDs for the album, best-matching pressings first."""
-        # Escape Lucene-special double quotes in the query terms.
+        # Escape Lucene-special double quotes in the query terms, and strip
+        # streaming-title edition suffixes that MusicBrainz doesn't carry.
         qa = artist.replace('"', " ").strip()
-        ql = album.replace('"', " ").strip()
+        ql = _clean_album_name(album).replace('"', " ").strip()
         data = self._mb_get(
             "release-group",
             query=f'artist:"{qa}" AND releasegroup:"{ql}"',
