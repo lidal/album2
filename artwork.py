@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -61,10 +62,20 @@ _SPREAD_RATIO = 1.5
 # same page rescanned at a different resolution/compression lands at 0-4;
 # genuinely different pages sit well above this.
 _PHASH_THRESH = 6
-# Longest edge stored on disk (screen is 720px; 1000 leaves headroom to crop).
-_STORE_MAX_PX = 1000
+# Longest edge stored on disk. The screen is 720px and _fit_art_surface()
+# always resizes to fit it exactly, so there's no real display benefit above
+# 720 — and every extra pixel here is extra decoded-image memory held per
+# page during _release_pages() on a device (Pi Zero 2W) where that's what
+# has caused hard resets.
+_STORE_MAX_PX = 720
 # Cap releases inspected per album so a huge release group can't stall forever.
 _MAX_RELEASES = 12
+# Cap raw refs downloaded+decoded per release. _release_pages() streams pages
+# to disk as it decodes them (see its docstring), so this is no longer a
+# memory-safety cap — just a bound on how long a single pathological booklet
+# can make one release fetch take. Refs are already type/order-sorted so this
+# only trims the tail of an unusually long booklet.
+_MAX_REFS_PER_RELEASE = 24
 # Country preference (tie-break when releases have the same art count), in the
 # order the user asked for.
 _COUNTRY_PRIORITY = {"NO": 0, "XE": 1, "GB": 2, "UK": 2, "US": 3, "CA": 4}
@@ -462,8 +473,9 @@ class ArtworkFetcher:
         self.clear(album_uri)
         d = self._album_dir(album_uri)
         os.makedirs(d, exist_ok=True)
-        pages = self._release_pages(candidate["refs"])
-        manifest = self._save_pages(d, pages, on_image)
+        with tempfile.TemporaryDirectory(prefix="tmp-", dir=_ARTWORK_CACHE_DIR) as tmp_dir:
+            pages = self._release_pages(candidate["refs"], tmp_dir)
+            manifest = self._save_pages(d, pages, on_image)
         with self._index_lock:
             self._index.add(album_uri)
         self._save_index()
@@ -489,18 +501,19 @@ class ArtworkFetcher:
         self._save_index()
 
     def _save_pages(self, album_dir: str,
-                    pages: list[tuple[str, str, Image.Image]], on_image=None) -> list[dict]:
-        """Downscale and save ordered (type, source, image) pages, persisting
-        the manifest incrementally so callers can show pages as they land."""
+                    pages: list[tuple[str, str, str]], on_image=None) -> list[dict]:
+        """Move ordered (type, source, tmp_path) pages into *album_dir*,
+        persisting the manifest incrementally so callers can show pages as
+        they land. The pages are already downscaled/encoded temp files from
+        `_release_pages` — this only renames them, no re-decode needed."""
         manifest: list[dict] = []
         seq = 0
-        for typ, source, img in pages:
-            img = self._downscale(img)
+        for typ, source, tmp_path in pages:
             seq += 1
             fname = f"{seq:02d}_{typ.lower()}.jpg"
             fpath = os.path.join(album_dir, fname)
             try:
-                img.save(fpath, "JPEG", quality=88)
+                shutil.move(tmp_path, fpath)
             except Exception as e:
                 log.debug("artwork: save %s failed: %s", fname, e)
                 continue
@@ -522,8 +535,9 @@ class ArtworkFetcher:
         os.makedirs(d, exist_ok=True)
 
         winner = self._pick_release(candidates, artist, album)
-        pages = self._release_pages(winner["refs"]) if winner else []
-        manifest = self._save_pages(d, pages, on_image)
+        with tempfile.TemporaryDirectory(prefix="tmp-", dir=_ARTWORK_CACHE_DIR) as tmp_dir:
+            pages = self._release_pages(winner["refs"], tmp_dir) if winner else []
+            manifest = self._save_pages(d, pages, on_image)
 
         with self._index_lock:
             self._index.add(album_uri)
@@ -548,12 +562,26 @@ class ArtworkFetcher:
                  len(cand["refs"]))
         return cand
 
-    def _release_pages(self, refs: list[ArtRef]) -> list[tuple[str, str, Image.Image]]:
-        """Download one release's art and return ordered (type, source, image)
-        pages: strips split, individual-vs-strip resolved, duplicates removed."""
+    def _release_pages(self, refs: list[ArtRef], tmp_dir: str) -> list[tuple[str, str, str]]:
+        """Download one release's art and return ordered (type, source,
+        tmp_path) pages: strips split, individual-vs-strip resolved,
+        duplicates removed.
+
+        Pages are written to *tmp_dir* as soon as they're decoded, so at most
+        one image is ever fully decoded in memory at a time — only a small
+        dHash + resolution stays around per page after that. Holding a whole
+        release's worth of decoded images at once measured ~100MB resident
+        for one 29-page booklet, enough by itself to hard-reset a
+        memory-constrained device (Pi Zero 2W, ~256MB typically free).
+        The caller owns *tmp_dir* and must remove it once the returned paths
+        have been consumed (see `_save_pages`, which moves them into place).
+        """
         refs = sorted(refs, key=lambda r: (_TYPE_ORDER.get(r.type, 8), r.order))
+        refs = refs[:_MAX_REFS_PER_RELEASE]
         seen_hashes: set[str] = set()
-        downloaded: list[tuple[ArtRef, Image.Image]] = []
+        # (ref, tmp_path, came_from_a_split_strip)
+        downloaded: list[tuple[ArtRef, str, bool]] = []
+        seq = 0
         for ref in refs:
             raw = self._download(ref.url)
             if not raw:
@@ -563,49 +591,66 @@ class ArtworkFetcher:
                 continue
             seen_hashes.add(h)
             try:
-                downloaded.append((ref, Image.open(io.BytesIO(raw)).convert("RGB")))
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
             except Exception:
                 continue
+            img = self._downscale(img)
+            panels = self._split_spread(img) if ref.type == "Booklet" else [img]
+            is_strip = len(panels) > 1
+            for panel in panels:
+                seq += 1
+                p = os.path.join(tmp_dir, f"{seq:03d}.jpg")
+                try:
+                    panel.save(p, "JPEG", quality=92)
+                    downloaded.append((ref, p, is_strip))
+                except Exception as e:
+                    log.debug("artwork: temp save failed: %s", e)
+            del img, panels   # only the temp file(s) remain — no decoded pixels held
 
         # A booklet arrives as individual page scans or one whole-pamphlet
         # strip (all pages in one wide/tall image); some releases carry both.
-        # Split any strip, then keep whichever representation has more pages
-        # (ties favour the individual scans — higher quality).
-        booklet_indiv: list[tuple[ArtRef, Image.Image]] = []
-        booklet_strip: list[tuple[ArtRef, Image.Image]] = []
-        others:        list[tuple[ArtRef, Image.Image]] = []
-        for ref, img in downloaded:
-            if ref.type == "Booklet":
-                split = self._split_spread(img)
-                if len(split) > 1:
-                    booklet_strip += [(ref, p) for p in split]
-                else:
-                    booklet_indiv.append((ref, img))
-            else:
-                others.append((ref, img))
-        chosen = booklet_indiv if len(booklet_indiv) >= len(booklet_strip) else booklet_strip
+        # Keep whichever representation has more pages (ties favour the
+        # individual scans — higher quality); drop the loser's temp files.
+        booklet_indiv = [(r, p) for r, p, strip in downloaded if r.type == "Booklet" and not strip]
+        booklet_strip = [(r, p) for r, p, strip in downloaded if r.type == "Booklet" and strip]
+        others        = [(r, p) for r, p, strip in downloaded if r.type != "Booklet"]
+        if len(booklet_indiv) >= len(booklet_strip):
+            chosen, rejected = booklet_indiv, booklet_strip
+        else:
+            chosen, rejected = booklet_strip, booklet_indiv
+        for _, p in rejected:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
         cands: list[dict] = []
-        for ref, img in others:
+        for ref, p in others:
             cands.append({"key": (_TYPE_ORDER.get(ref.type, 8), ref.order, 0),
-                          "ref": ref, "img": img})
-        for i, (ref, img) in enumerate(chosen):
+                          "ref": ref, "path": p})
+        for i, (ref, p) in enumerate(chosen):
             cands.append({"key": (_TYPE_ORDER.get("Booklet", 2), ref.order, i),
-                          "ref": ref, "img": img})
+                          "ref": ref, "path": p})
 
         # Perceptual dedup: the same page is often uploaded as several separate
         # scans (different bytes, so an exact hash misses them).  Keep the
         # highest-resolution representative of each near-duplicate cluster.
+        # Each temp file is opened, hashed, and closed one at a time.
         for c in cands:
-            c["phash"] = self._dhash(c["img"])
-            c["res"] = c["img"].size[0] * c["img"].size[1]
+            with Image.open(c["path"]) as img:
+                c["phash"] = self._dhash(img)
+                c["res"]   = img.size[0] * img.size[1]
         kept: list[dict] = []
         for c in sorted(cands, key=lambda c: -c["res"]):
             if any(self._hamming(c["phash"], k["phash"]) <= _PHASH_THRESH for k in kept):
+                try:
+                    os.remove(c["path"])
+                except OSError:
+                    pass
                 continue
             kept.append(c)
         kept.sort(key=lambda c: c["key"])
-        return [(c["ref"].type, c["ref"].source, c["img"]) for c in kept]
+        return [(c["ref"].type, c["ref"].source, c["path"]) for c in kept]
 
     @staticmethod
     def _write_manifest(album_dir: str, manifest: list[dict]):

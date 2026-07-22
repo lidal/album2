@@ -20,6 +20,8 @@ _DEFAULTS: dict = {
     "library":          "local",
     "album_sort":       "artist a→z",
     "spotify_bitrate":  "160",
+    "art_autofetch":     True,
+    "lyrics_autofetch":  True,
 }
 
 _data: dict = {}

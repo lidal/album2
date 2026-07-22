@@ -244,6 +244,7 @@ _SETTINGS_ITEMS = [
     (None,          "PLAYBACK"),
     ("autoplay",    "Autoplay when opening album"),
     ("lyrics",      "Show lyrics"),
+    ("lyrics_autofetch", "Automatically fetch new lyrics"),
     (None,          "LIBRARY"),
     ("library",     "Library"),
     ("album_sort",  "Sort by"),
@@ -251,6 +252,7 @@ _SETTINGS_ITEMS = [
     ("spotify_bitrate", "Bitrate"),
     ("lyrics_cache_all", "Cache all lyrics"),
     (None,          "ARTWORK"),
+    ("art_autofetch",     "Automatically fetch new artwork"),
     ("art_cache_local",   "Fetch artwork (local)"),
     ("art_cache_spotify", "Fetch artwork (Spotify)"),
     (None,          "GRID"),
@@ -405,8 +407,7 @@ class App:
         self._album_menu_open:    bool = False
         # None = closed | "loading" = fetching the candidate list | list[dict] = ready
         self._art_release_picker: object = None
-        self._art_release_gen:         int  = 0     # invalidates stale "loading" results
-        self._art_release_downloading: bool = False # fetching the user's chosen release
+        self._art_release_gen:    int  = 0     # invalidates stale "loading" results
         self._menu_toast:    str | None = None
         self._menu_toast_ms: int = 0
 
@@ -1068,7 +1069,7 @@ class App:
 
                 or self._flash_alpha > 0
                 or self._menu_toast is not None
-                or self._art_release_downloading
+                or (self._art_album_uri and self._art_album_uri in self._art_fetching)
                 or self._art_release_picker == "loading"
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
@@ -1237,8 +1238,9 @@ class App:
                     # with poll updates that could change self._song mid-fetch.
                     _snap_song   = dict(self._song)
                     _snap_status = dict(self._status)
-                    def _fetch_lyr(u=new_uri, ss=_snap_song, st=_snap_status):
-                        text   = self._load_lyrics_for_uri(u, song=ss, status=st)
+                    def _fetch_lyr(u=new_uri, ss=_snap_song, st=_snap_status,
+                                   online=settings.get("lyrics_autofetch")):
+                        text   = self._load_lyrics_for_uri(u, song=ss, status=st, online=online)
                         parsed = self._parse_lyrics(text) if text else None
                         self._lyrics_cache[u]  = parsed
                         self._lyrics_parsed    = parsed
@@ -1257,7 +1259,7 @@ class App:
 
                 or self._flash_alpha > 0
                 or self._menu_toast is not None
-                or self._art_release_downloading
+                or (self._art_album_uri and self._art_album_uri in self._art_fetching)
                 or self._art_release_picker == "loading"
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
@@ -2052,8 +2054,8 @@ class App:
                 # track count, unless it's already cached.  Populates the
                 # carousel progressively as pages arrive.
                 if album.get("track_uri", "") == self._art_album_uri:
-                    self._load_art_set(album, allow_fetch=True)
-                if tracks and settings.get("lyrics"):
+                    self._load_art_set(album, allow_fetch=settings.get("art_autofetch"))
+                if tracks and settings.get("lyrics") and settings.get("lyrics_autofetch"):
                     self._prefetch_album_lyrics(tracks)
                 if tracks:
                     t0 = tracks[0]
@@ -2508,17 +2510,23 @@ class App:
     def _load_lyrics_for_uri(self, uri: str,
                              song: dict | None = None,
                              status: dict | None = None,
-                             force: bool = False) -> str | None:
+                             force: bool = False,
+                             online: bool = True) -> str | None:
         """Return lyrics text for *uri*, preferring embedded then cache then
         online sources — unless *force*, which skips straight to a fresh
-        online lookup (used by the explicit "Download lyrics" menu action)."""
+        online lookup (used by the explicit "Download lyrics" menu action).
+
+        *online=False* (the "Automatically fetch new lyrics" setting turned
+        off) skips the online lookup entirely once embedded/cache are
+        exhausted, rather than silently reaching out to lrclib/lyrics.ovh."""
         if song is None:
             song = self._song
         if status is None:
             status = self._status
         path     = self._resolve_music_path(uri)
         lrc_path = self._lrc_disk_path(uri, path)
-        log.info("lyrics: loading for uri=%s lrc_path=%s force=%s", uri, lrc_path, force)
+        log.info("lyrics: loading for uri=%s lrc_path=%s force=%s online=%s",
+                 uri, lrc_path, force, online)
 
         if not force:
             # 1. embedded tags (FLAC via mutagen)
@@ -2542,6 +2550,10 @@ class App:
                     log.warning("lyrics: lrc read error: %s", e)
         else:
             log.info("lyrics: force download — skipping embedded/cache, querying online sources")
+
+        if not online:
+            log.info("lyrics: auto-fetch disabled — not querying online sources")
+            return None
 
         # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
@@ -3905,7 +3917,6 @@ class App:
             self._show_menu_toast("Already fetching art for this album")
             return
         self._art_fetching.add(album_uri)
-        self._art_release_downloading = True
         self._art_paths = []
         self._art_count = 1
         self._art_pos = self._art_pos_t = 0.0
@@ -3931,7 +3942,6 @@ class App:
                 ok = False
             finally:
                 self._art_fetching.discard(album_uri)
-                self._art_release_downloading = False
             self._show_menu_toast("Album art downloaded" if ok else "Download failed")
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -4045,11 +4055,24 @@ class App:
                                 H - PROGRESS_H - surf.get_height() - 28))
 
     def _draw_release_status(self):
-        """Persistent (non-fading) status pill while art is downloading —
-        the release picker itself shows the "loading releases" spinner."""
-        if not self._art_release_downloading:
+        """Persistent (non-fading) status pill while art and/or lyrics are
+        being fetched for the currently open album — combined into one pill
+        when both happen to be in flight at once. Covers both the automatic
+        fetch-on-open and the manual "Download..." menu actions, since both
+        go through the same `_art_fetching`/`_lyrics_loading` flags. The
+        release picker itself shows its own "loading releases" spinner."""
+        if self._view != View.ALBUM:
             return
-        base = "Downloading album art"
+        art_busy    = bool(self._art_album_uri) and self._art_album_uri in self._art_fetching
+        lyrics_busy = self._lyrics_loading
+        if not art_busy and not lyrics_busy:
+            return
+        if art_busy and lyrics_busy:
+            base = "Downloading album art & lyrics"
+        elif art_busy:
+            base = "Downloading album art"
+        else:
+            base = "Downloading lyrics"
         dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
         surf = self._pill_surface(base + dots, reserve_text=base + "...")
         self.screen.blit(surf, ((W - surf.get_width()) // 2,
