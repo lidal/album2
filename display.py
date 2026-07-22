@@ -876,7 +876,7 @@ class App:
                 tracks = album.get("tracks")
                 track_count = len(tracks) if tracks else 0
                 self._artwork.fetch(album_uri, artist, name, track_count,
-                                    on_image=_on_image)
+                                    year=album.get("year", 0), on_image=_on_image)
             except Exception as e:
                 log.warning("art set fetch failed for %s: %s", album_uri, e)
             finally:
@@ -2439,7 +2439,8 @@ class App:
                     tc = len(tracks)
                     try:
                         self._artwork.fetch(uri, album.get("artist", ""),
-                                            album.get("name", ""), tc)
+                                            album.get("name", ""), tc,
+                                            year=album.get("year", 0))
                     except Exception:
                         log.exception("bulk art: failed for %s", album.get("name"))
             self._art_bulk_progress = None
@@ -3894,6 +3895,7 @@ class App:
         album = self._albums[self._cur_idx]
         artist = album.get("artist", "")
         name   = album.get("name", "")
+        year   = album.get("year", 0)
         tracks = album.get("tracks") or self._tracks
         track_count = len(tracks) if tracks else 0
         self._art_release_gen += 1
@@ -3901,9 +3903,10 @@ class App:
         self._art_release_picker = "loading"
         self._dirty = True
 
-        def _bg(artist=artist, name=name, track_count=track_count, gen=gen, album_uri=album_uri):
+        def _bg(artist=artist, name=name, track_count=track_count, year=year,
+                gen=gen, album_uri=album_uri):
             try:
-                cands = self._artwork.list_candidates(artist, name, track_count)
+                cands = self._artwork.list_candidates(artist, name, track_count, year)
             except Exception as e:
                 log.warning("release picker: list failed for %s - %s: %s", artist, name, e)
                 cands = []

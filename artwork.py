@@ -163,7 +163,7 @@ class ArtworkProvider:
     id = "base"
 
     def collect(self, artist: str, album: str, track_count: int,
-                types: tuple[str, ...]) -> list[ArtRef]:
+                types: tuple[str, ...], year: int = 0) -> list[ArtRef]:
         raise NotImplementedError
 
 
@@ -226,7 +226,48 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 return cand
         return "Other"
 
-    def _pick_release_group(self, artist: str, album: str) -> str:
+    def _resolve_artist_id(self, artist: str) -> str:
+        """Return the best-matching artist MBID for *artist*, or ''."""
+        qa = artist.replace('"', " ").strip()
+        data = self._mb_get("artist", query=f'artist:"{qa}"', limit=5)
+        artists = data.get("artists", [])
+        return artists[0]["id"] if artists else ""
+
+    def _pick_release_group_by_year(self, artist: str, year: int) -> str:
+        """Fallback when the title search finds nothing: browse the artist's
+        whole release-group catalog by MBID (not text search, so it doesn't
+        depend on title text at all) and match on the locally-known release
+        year instead. Handles titles that share no text with MB's title at
+        all — e.g. David Bowie's "★", tagged locally as plain "Blackstar".
+        """
+        artist_id = self._resolve_artist_id(artist)
+        if not artist_id:
+            return ""
+        candidates: list[dict] = []
+        for offset in (0, 100, 200):
+            data = self._mb_get("release-group", artist=artist_id, type="album",
+                                limit=100, offset=offset)
+            page = data.get("release-groups", [])
+            candidates.extend(page)
+            if len(page) < 100:
+                break
+        matches = [g for g in candidates
+                  if str(g.get("first-release-date", ""))[:4] == str(year)]
+        if not matches:
+            return ""
+
+        def rank(g: dict):
+            secondary = g.get("secondary-types") or []
+            return (len(secondary), g.get("first-release-date") or "9999")
+
+        best = min(matches, key=rank)
+        sec = best.get("secondary-types") or []
+        log.info("artwork: year-fallback matched %s (%d) -> %r (%s%s)",
+                 artist, year, best["title"], best.get("primary-type"),
+                 "/" + ",".join(sec) if sec else "")
+        return best["id"]
+
+    def _pick_release_group(self, artist: str, album: str, year: int = 0) -> str:
         """Return the best-matching release-group MBID, or ''.
 
         Album titles like "Paranoid" match both the studio album *and* a
@@ -241,14 +282,26 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         just "David Bowie", with 'aka "Man of Words / Man of Music" then
         "Space Oddity"' as disambiguation) — a phrase query against the title
         alone would never match "David Bowie (aka Space Oddity)".
+
+        Also matched against MB's *alias* field, not just the title: some
+        releases are tagged locally under a plain-text alias while MB's own
+        title is a symbol (David Bowie's "★", tagged "Blackstar" almost
+        everywhere) — `releasegroup:` alone does not search aliases, so a
+        title-only query finds nothing for these even though MB has the
+        alias on file.
         """
         qa = artist.replace('"', " ").strip()
         ql = _clean_album_name(album).replace('"', " ").strip()
         data = self._mb_get("release-group",
-                            query=f'artist:"{qa}" AND releasegroup:({ql})', limit=10)
+                            query=f'artist:"{qa}" AND (releasegroup:({ql}) OR alias:({ql}))',
+                            limit=10)
         groups = [g for g in data.get("release-groups", [])
                   if int(g.get("score", 0)) >= 85]
         if not groups:
+            if year and year not in (0, 9999):
+                log.info("artwork: no MB title match for %s - %s, trying year=%d fallback",
+                         artist, ql, year)
+                return self._pick_release_group_by_year(artist, year)
             log.info("artwork: no MB match for %s - %s", artist, ql)
             return ""
 
@@ -269,10 +322,10 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         return best["id"]
 
     def _release_ids(self, artist: str, album: str,
-                     track_count: int) -> list[dict]:
+                     track_count: int, year: int = 0) -> list[dict]:
         """Return release metadata for the album, best pressings first:
         preferred-country then track-count-matching editions lead."""
-        rg_id = self._pick_release_group(artist, album)
+        rg_id = self._pick_release_group(artist, album, year)
         if not rg_id:
             return []
         rel_data = self._mb_get("release", **{"release-group": rg_id,
@@ -296,7 +349,7 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 for r in releases[:_MAX_RELEASES]]
 
     def collect(self, artist: str, album: str, track_count: int,
-                types: tuple[str, ...]) -> list[dict]:
+                types: tuple[str, ...], year: int = 0) -> list[dict]:
         """Return one candidate per release: {release_id, country, title,
         disambiguation, date, refs}.
 
@@ -305,7 +358,7 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         that release's refs intact.
         """
         want = set(types)
-        releases = self._release_ids(artist, album, track_count)
+        releases = self._release_ids(artist, album, track_count, year)
         if not releases:
             return []
         candidates: list[dict] = []
@@ -429,8 +482,14 @@ class ArtworkFetcher:
     # -- fetching --
 
     def fetch(self, album_uri: str, artist: str, album: str,
-              track_count: int = 0, force: bool = False, on_image=None) -> list[str]:
+              track_count: int = 0, year: int = 0, force: bool = False,
+              on_image=None) -> list[str]:
         """Fetch (or return cached) extended artwork; returns ordered paths.
+
+        *year*, if known, is used only as a fallback when the album title
+        shares no matchable text with MusicBrainz's title at all (e.g. a
+        symbol-only title like David Bowie's "★", tagged locally as plain
+        "Blackstar") — see `_pick_release_group_by_year`.
 
         *on_image*, if given, is called with each image path as it is saved,
         so callers can populate a UI progressively during a slow fetch.
@@ -443,13 +502,14 @@ class ArtworkFetcher:
                         on_image(p)
                 return cached
         try:
-            return self._do_fetch(album_uri, artist, album, track_count, on_image)
+            return self._do_fetch(album_uri, artist, album, track_count, year, on_image)
         except Exception as e:
             log.warning("artwork: fetch failed for %s (%s - %s): %s",
                         album_uri, artist, album, e)
             return []
 
-    def list_candidates(self, artist: str, album: str, track_count: int = 0) -> list[dict]:
+    def list_candidates(self, artist: str, album: str, track_count: int = 0,
+                        year: int = 0) -> list[dict]:
         """Enumerate candidate releases for a manual picker.
 
         Each candidate is {release_id, country, title, disambiguation, date,
@@ -460,7 +520,8 @@ class ArtworkFetcher:
         candidates: list[dict] = []
         for provider in self._providers:
             try:
-                candidates.extend(provider.collect(artist, album, track_count, self._types))
+                candidates.extend(provider.collect(artist, album, track_count,
+                                                    self._types, year))
             except Exception as e:
                 log.debug("artwork: provider %s failed: %s", provider.id, e)
         candidates.sort(key=lambda c: (-len(c["refs"]), _country_priority(c["country"])))
@@ -528,8 +589,8 @@ class ArtworkFetcher:
         return manifest
 
     def _do_fetch(self, album_uri: str, artist: str, album: str,
-                  track_count: int, on_image=None) -> list[str]:
-        candidates = self.list_candidates(artist, album, track_count)
+                  track_count: int, year: int = 0, on_image=None) -> list[str]:
+        candidates = self.list_candidates(artist, album, track_count, year)
 
         d = self._album_dir(album_uri)
         os.makedirs(d, exist_ok=True)
