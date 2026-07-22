@@ -403,7 +403,10 @@ class App:
 
         # playback-screen menu: download/clear artwork & lyrics
         self._album_menu_open:    bool = False
-        self._art_release_picker: list[dict] | None = None  # candidates, or None if closed
+        # None = closed | "loading" = fetching the candidate list | list[dict] = ready
+        self._art_release_picker: object = None
+        self._art_release_gen:         int  = 0     # invalidates stale "loading" results
+        self._art_release_downloading: bool = False # fetching the user's chosen release
         self._menu_toast:    str | None = None
         self._menu_toast_ms: int = 0
 
@@ -1065,6 +1068,8 @@ class App:
 
                 or self._flash_alpha > 0
                 or self._menu_toast is not None
+                or self._art_release_downloading
+                or self._art_release_picker == "loading"
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or now_ms < self._vol_until_ms
@@ -1252,6 +1257,8 @@ class App:
 
                 or self._flash_alpha > 0
                 or self._menu_toast is not None
+                or self._art_release_downloading
+                or self._art_release_picker == "loading"
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or self._bt_refreshing
@@ -1836,6 +1843,7 @@ class App:
             self._draw_album_menu()
         if self._art_release_picker is not None:
             self._draw_release_picker()
+        self._draw_release_status()
         self._draw_menu_toast()
 
     # ── draw: tracklist ───────────────────────────────────────────────────────
@@ -3771,6 +3779,13 @@ class App:
         pygame.draw.rect(self.screen, COL_CELL_BG, (px, py, pw, ph), border_radius=10)
         pygame.draw.rect(self.screen, COL_SEP,     (px, py, pw, ph), width=1, border_radius=10)
 
+        if cands == "loading":
+            dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
+            ts = _render_text(self._f_track, "Loading releases" + dots, COL_TEXT_ALBUM)
+            self.screen.blit(ts, (px + (pw - ts.get_width()) // 2, py + ph // 2 - 60))
+            self._draw_spinner(px + pw // 2, py + ph // 2 + 20)
+            return
+
         header_h  = TRACK_ROW_H
         clip_y    = py + header_h
         clip_h    = ph - header_h
@@ -3812,7 +3827,7 @@ class App:
 
     def _release_picker_item_at(self, pos) -> dict | None:
         cands = self._art_release_picker
-        if not cands:
+        if not isinstance(cands, list) or not cands:
             return None
         px, py, pw, ph = self._release_picker_rect()
         header_h = TRACK_ROW_H
@@ -3831,32 +3846,41 @@ class App:
         name   = album.get("name", "")
         tracks = album.get("tracks") or self._tracks
         track_count = len(tracks) if tracks else 0
-        self._show_menu_toast("Loading releases…")
+        self._art_release_gen += 1
+        gen = self._art_release_gen
+        self._art_release_picker = "loading"
+        self._dirty = True
 
-        def _bg(artist=artist, name=name, track_count=track_count):
+        def _bg(artist=artist, name=name, track_count=track_count, gen=gen):
             try:
                 cands = self._artwork.list_candidates(artist, name, track_count)
             except Exception as e:
                 log.warning("release picker: list failed for %s - %s: %s", artist, name, e)
                 cands = []
+            if self._art_release_gen != gen:
+                return   # superseded by a newer request, or dismissed
             if cands:
                 self._art_release_picker = cands
             else:
+                self._art_release_picker = None
                 self._show_menu_toast("No releases found")
             self._dirty = True
         threading.Thread(target=_bg, daemon=True).start()
 
     def _pick_release_from_picker(self, candidate: dict):
         self._art_release_picker = None
+        self._art_release_gen   += 1   # invalidate any still-in-flight listing
         album_uri = self._art_album_uri
         if not album_uri or album_uri in self._art_fetching:
             return
         self._art_fetching.add(album_uri)
+        self._art_release_downloading = True
         self._art_paths = []
         self._art_count = 1
         self._art_pos = self._art_pos_t = 0.0
         self._art_idx = 0
         self._art_page_surf.clear()
+        self._dirty = True
 
         def _on_image(path):
             if album_uri != self._art_album_uri:
@@ -3870,12 +3894,14 @@ class App:
         def _bg():
             try:
                 self._artwork.fetch_release(album_uri, candidate, on_image=_on_image)
-                self._show_menu_toast("Album art downloaded")
+                ok = True
             except Exception as e:
                 log.warning("release picker: fetch failed for %s: %s", album_uri, e)
-                self._show_menu_toast("Download failed")
+                ok = False
             finally:
                 self._art_fetching.discard(album_uri)
+                self._art_release_downloading = False
+            self._show_menu_toast("Album art downloaded" if ok else "Download failed")
         threading.Thread(target=_bg, daemon=True).start()
 
     def _clear_album_art_current(self):
@@ -3947,6 +3973,21 @@ class App:
 
     # ── menu toast (small transient confirmation) ───────────────────────────────
 
+    def _pill_surface(self, text: str, alpha: int = 255) -> pygame.Surface:
+        """A small rounded, semi-transparent label — used for the fading
+        confirmation toast and the persistent download-progress status."""
+        text_s = _render_text(self._f_track, text, (235, 235, 235))
+        pad_x, pad_y = 22, 12
+        pw, ph = text_s.get_width() + pad_x * 2, text_s.get_height() + pad_y * 2
+        surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (20, 20, 26, int(210 * alpha / 255)), (0, 0, pw, ph),
+                         border_radius=ph // 2)
+        if alpha < 255:
+            text_s = text_s.copy()
+            text_s.set_alpha(alpha)
+        surf.blit(text_s, (pad_x, pad_y))
+        return surf
+
     def _show_menu_toast(self, text: str):
         self._menu_toast    = text
         self._menu_toast_ms = pygame.time.get_ticks()
@@ -3961,18 +4002,19 @@ class App:
             self._menu_toast = None
             return
         alpha = 255 if elapsed < hold else max(0, int(255 * (1 - (elapsed - hold) / fade)))
+        surf  = self._pill_surface(self._menu_toast, alpha)
+        self.screen.blit(surf, ((W - surf.get_width()) // 2,
+                                H - PROGRESS_H - surf.get_height() - 28))
 
-        text_s = _render_text(self._f_track, self._menu_toast, (235, 235, 235))
-        pad_x, pad_y = 22, 12
-        pw, ph = text_s.get_width() + pad_x * 2, text_s.get_height() + pad_y * 2
-        surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
-        pygame.draw.rect(surf, (20, 20, 26, int(210 * alpha / 255)), (0, 0, pw, ph),
-                         border_radius=ph // 2)
-        if alpha < 255:
-            text_s = text_s.copy()
-            text_s.set_alpha(alpha)
-        surf.blit(text_s, (pad_x, pad_y))
-        self.screen.blit(surf, ((W - pw) // 2, H - PROGRESS_H - ph - 28))
+    def _draw_release_status(self):
+        """Persistent (non-fading) status pill while art is downloading —
+        the release picker itself shows the "loading releases" spinner."""
+        if not self._art_release_downloading:
+            return
+        dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
+        surf = self._pill_surface("Downloading album art" + dots)
+        self.screen.blit(surf, ((W - surf.get_width()) // 2,
+                                H - PROGRESS_H - surf.get_height() - 28))
 
     # ── hit testing ───────────────────────────────────────────────────────────
 
@@ -4390,6 +4432,7 @@ class App:
                             self._pick_release_from_picker(cand)
                     else:
                         self._art_release_picker = None
+                        self._art_release_gen   += 1   # invalidate an in-flight listing
                     self._dirty = True
                     return
 
@@ -4503,7 +4546,9 @@ class App:
         self._ctrl_a = 0.0; self._ctrl_a_t = 0.0
         self._audio_popup_open  = False
         self._album_menu_open   = False
-        self._art_release_picker = None
+        if self._art_release_picker is not None:
+            self._art_release_picker = None
+            self._art_release_gen   += 1
 
     def _reset_elapsed(self):
         self._elapsed_base   = 0.0
