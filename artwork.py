@@ -251,8 +251,8 @@ class MusicBrainzCAAProvider(ArtworkProvider):
         return best["id"]
 
     def _release_ids(self, artist: str, album: str,
-                     track_count: int) -> list[tuple[str, str]]:
-        """Return (release MBID, country) for the album, best pressings first:
+                     track_count: int) -> list[dict]:
+        """Return release metadata for the album, best pressings first:
         preferred-country then track-count-matching editions lead."""
         rg_id = self._pick_release_group(artist, album)
         if not rg_id:
@@ -271,21 +271,28 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                     abs(tt - track_count) if track_count else 0)
 
         releases.sort(key=sort_key)
-        return [(r["id"], r.get("country") or "") for r in releases[:_MAX_RELEASES]]
+        return [{"id": r["id"], "country": r.get("country") or "",
+                 "title": r.get("title") or album,
+                 "disambiguation": r.get("disambiguation") or "",
+                 "date": r.get("date") or ""}
+                for r in releases[:_MAX_RELEASES]]
 
     def collect(self, artist: str, album: str, track_count: int,
                 types: tuple[str, ...]) -> list[dict]:
-        """Return one candidate per release: {release_id, country, refs}.
+        """Return one candidate per release: {release_id, country, title,
+        disambiguation, date, refs}.
 
-        Art is never aggregated across releases — the caller picks a single
-        best release — so each candidate keeps that release's refs intact.
+        Art is never aggregated across releases — the caller (or the user, via
+        the manual picker) chooses a single release — so each candidate keeps
+        that release's refs intact.
         """
         want = set(types)
         releases = self._release_ids(artist, album, track_count)
         if not releases:
             return []
         candidates: list[dict] = []
-        for rel_id, country in releases:
+        for rel in releases:
+            rel_id = rel["id"]
             listing = self._caa_get("release", rel_id)
             images = listing.get("images", []) if listing else []
             refs: list[ArtRef] = []
@@ -303,7 +310,10 @@ class MusicBrainzCAAProvider(ArtworkProvider):
                 refs.append(ArtRef(type=ntype, url=url, source=self.id,
                                    approved=bool(img.get("approved")), order=order))
             if refs:
-                candidates.append({"release_id": rel_id, "country": country, "refs": refs})
+                candidates.append({"release_id": rel_id, "country": rel["country"],
+                                   "title": rel["title"],
+                                   "disambiguation": rel["disambiguation"],
+                                   "date": rel["date"], "refs": refs})
         return candidates
 
 
@@ -415,45 +425,93 @@ class ArtworkFetcher:
                         album_uri, artist, album, e)
             return []
 
-    def _do_fetch(self, album_uri: str, artist: str, album: str,
-                  track_count: int, on_image=None) -> list[str]:
+    def list_candidates(self, artist: str, album: str, track_count: int = 0) -> list[dict]:
+        """Enumerate candidate releases for a manual picker.
+
+        Each candidate is {release_id, country, title, disambiguation, date,
+        refs} — the same data the automatic picker uses to choose a release,
+        so a UI can list them (name / region / picture count) and let the
+        user override the automatic choice. Downloads no image bytes.
+        """
         candidates: list[dict] = []
         for provider in self._providers:
             try:
                 candidates.extend(provider.collect(artist, album, track_count, self._types))
             except Exception as e:
                 log.debug("artwork: provider %s failed: %s", provider.id, e)
+        candidates.sort(key=lambda c: (-len(c["refs"]), _country_priority(c["country"])))
+        return candidates
 
+    def fetch_release(self, album_uri: str, candidate: dict, on_image=None) -> list[str]:
+        """Download one specific, user-chosen release (from `list_candidates`)
+        and replace whatever extended artwork is currently cached for
+        *album_uri* with it."""
+        self.clear(album_uri)
         d = self._album_dir(album_uri)
         os.makedirs(d, exist_ok=True)
+        pages = self._release_pages(candidate["refs"])
+        manifest = self._save_pages(d, pages, on_image)
+        with self._index_lock:
+            self._index.add(album_uri)
+        self._save_index()
+        log.info("artwork: manual release %s → %d image(s)",
+                 candidate.get("release_id", "?")[:8], len(manifest))
+        return [os.path.join(d, e["file"]) for e in manifest]
 
-        winner = self._pick_release(candidates, artist, album)
-        pages = self._release_pages(winner["refs"]) if winner else []
+    def clear(self, album_uri: str) -> None:
+        """Delete cached extended art for one album and drop it from the
+        index, so it is looked up fresh next time it's opened or fetched."""
+        d = self._album_dir(album_uri)
+        try:
+            if os.path.isdir(d):
+                for fname in os.listdir(d):
+                    try:
+                        os.remove(os.path.join(d, fname))
+                    except OSError:
+                        pass
+        except Exception as e:
+            log.warning("artwork: clear failed for %s: %s", album_uri, e)
+        with self._index_lock:
+            self._index.discard(album_uri)
+        self._save_index()
 
+    def _save_pages(self, album_dir: str,
+                    pages: list[tuple[str, str, Image.Image]], on_image=None) -> list[dict]:
+        """Downscale and save ordered (type, source, image) pages, persisting
+        the manifest incrementally so callers can show pages as they land."""
         manifest: list[dict] = []
         seq = 0
         for typ, source, img in pages:
             img = self._downscale(img)
             seq += 1
             fname = f"{seq:02d}_{typ.lower()}.jpg"
-            fpath = os.path.join(d, fname)
+            fpath = os.path.join(album_dir, fname)
             try:
                 img.save(fpath, "JPEG", quality=88)
             except Exception as e:
                 log.debug("artwork: save %s failed: %s", fname, e)
                 continue
             manifest.append({"file": fname, "type": typ, "source": source})
-            # Persist incrementally (usable/resumable if interrupted) and let
-            # the caller show the page as it lands.
-            self._write_manifest(d, manifest)
+            self._write_manifest(album_dir, manifest)
             if on_image:
                 try:
                     on_image(fpath)
                 except Exception:
                     pass
+        self._write_manifest(album_dir, manifest)
+        return manifest
 
-        # Final manifest (possibly empty = sentinel) and mark done.
-        self._write_manifest(d, manifest)
+    def _do_fetch(self, album_uri: str, artist: str, album: str,
+                  track_count: int, on_image=None) -> list[str]:
+        candidates = self.list_candidates(artist, album, track_count)
+
+        d = self._album_dir(album_uri)
+        os.makedirs(d, exist_ok=True)
+
+        winner = self._pick_release(candidates, artist, album)
+        pages = self._release_pages(winner["refs"]) if winner else []
+        manifest = self._save_pages(d, pages, on_image)
+
         with self._index_lock:
             self._index.add(album_uri)
         self._save_index()

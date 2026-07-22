@@ -86,6 +86,14 @@ _LRC_META_RE = re.compile(r'^\[\w+:[^\]]*\]')             # metadata like [ti:..
 
 _ART_DOTS_HOLD_MS = 2000   # how long the page dots stay visible after the last slide
 
+_ALBUM_MENU_ITEMS = [
+    ("dl_art",       "Download album art"),
+    ("clear_art",    "Clear album art"),
+    ("dl_lyrics",    "Download lyrics"),
+    ("clear_lyrics", "Clear lyrics"),
+]
+_REL_ROW_H = int(TRACK_ROW_H * 1.6)   # release-picker rows carry two lines of text
+
 W, H = SCREEN_WIDTH, SCREEN_HEIGHT
 
 _THUMB_CACHE_DIR = (THUMB_CACHE_DIR
@@ -392,6 +400,12 @@ class App:
         self._cache_cleared_ms: int = 0   # ticks when last cleared (0 = not recently)
         self._instrumental_cleared_ms: int = 0
         self._lyrics_album_index: set[str] = self._load_lyrics_index()
+
+        # playback-screen menu: download/clear artwork & lyrics
+        self._album_menu_open:    bool = False
+        self._art_release_picker: list[dict] | None = None  # candidates, or None if closed
+        self._menu_toast:    str | None = None
+        self._menu_toast_ms: int = 0
 
         # audio output popup
         self._audio_popup_open: bool = False
@@ -1050,6 +1064,7 @@ class App:
                 or any(abs(self._accent_cur[i] - self._accent_t[i]) > 0.5 for i in range(3))
 
                 or self._flash_alpha > 0
+                or self._menu_toast is not None
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or now_ms < self._vol_until_ms
@@ -1236,6 +1251,7 @@ class App:
                 or any(abs(self._tl_bg_cur[i] - self._tl_bg_t[i]) > 0.5 for i in range(3))
 
                 or self._flash_alpha > 0
+                or self._menu_toast is not None
                 or self._pending_tap
                 or (self._view not in (View.SETTINGS, View.CALIBRATE) and self._progress_px_changed())
                 or self._bt_refreshing
@@ -1781,6 +1797,11 @@ class App:
         _circle(gx, gy, BTN_RADIUS, "gear", accent)
         self._draw_gear_icon(gx, gy, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=icon_col, hole_col=accent)
 
+        # menu button (artwork / lyrics download & clear)
+        mx, my = self._menu_btn_pos()
+        _circle(mx, my, BTN_RADIUS, "menu", accent)
+        self._draw_menu_icon(mx, my, BTN_RADIUS - max(1, BTN_RADIUS * 5 // 12), col=icon_col)
+
         # close button
         bx = W - BTN_RADIUS - BTN_MARGIN
         by = BTN_MARGIN + BTN_RADIUS
@@ -1810,6 +1831,12 @@ class App:
 
         if settings.get("lyrics"):
             self._draw_lyrics(alpha)
+
+        if self._album_menu_open:
+            self._draw_album_menu()
+        if self._art_release_picker is not None:
+            self._draw_release_picker()
+        self._draw_menu_toast()
 
     # ── draw: tracklist ───────────────────────────────────────────────────────
 
@@ -2442,46 +2469,68 @@ class App:
         except Exception as e:
             log.warning("lyrics: could not save lrc: %s", e)
 
+    @staticmethod
+    def _embedded_lyrics(path: str | None) -> str | None:
+        """Non-empty embedded lyrics tag from a local FLAC file, or None.
+
+        A tag that exists but is blank does not count — callers should fall
+        back to external lookups in that case rather than showing nothing.
+        """
+        if not path or not path.lower().endswith(".flac"):
+            return None
+        try:
+            from mutagen.flac import FLAC
+            f = FLAC(path)
+            for tag in ("LYRICS", "UNSYNCEDLYRICS", "lyrics", "unsyncedlyrics"):
+                if tag in f:
+                    text = "\n".join(f[tag]).strip()
+                    if text:
+                        log.info("lyrics: found embedded tag %r", tag)
+                        return text
+                    log.info("lyrics: embedded tag %r present but empty", tag)
+        except ImportError:
+            log.info("lyrics: mutagen not available, skipping embedded")
+        except Exception as e:
+            log.warning("lyrics: embedded load error: %s", e)
+        return None
+
     def _load_lyrics_for_uri(self, uri: str,
                              song: dict | None = None,
-                             status: dict | None = None) -> str | None:
+                             status: dict | None = None,
+                             force: bool = False) -> str | None:
+        """Return lyrics text for *uri*, preferring embedded then cache then
+        online sources — unless *force*, which skips straight to a fresh
+        online lookup (used by the explicit "Download lyrics" menu action)."""
         if song is None:
             song = self._song
         if status is None:
             status = self._status
         path     = self._resolve_music_path(uri)
         lrc_path = self._lrc_disk_path(uri, path)
-        log.info("lyrics: loading for uri=%s lrc_path=%s", uri, lrc_path)
+        log.info("lyrics: loading for uri=%s lrc_path=%s force=%s", uri, lrc_path, force)
 
-        # 1. embedded tags (FLAC via mutagen)
-        if path and path.lower().endswith(".flac"):
-            try:
-                from mutagen.flac import FLAC
-                f = FLAC(path)
-                for tag in ("LYRICS", "UNSYNCEDLYRICS", "lyrics", "unsyncedlyrics"):
-                    if tag in f:
-                        log.info("lyrics: found embedded tag %r", tag)
-                        return "\n".join(f[tag])
-                log.info("lyrics: no embedded tag in FLAC")
-            except ImportError:
-                log.info("lyrics: mutagen not available, skipping embedded")
-            except Exception as e:
-                log.warning("lyrics: embedded load error: %s", e)
+        if not force:
+            # 1. embedded tags (FLAC via mutagen)
+            embedded = self._embedded_lyrics(path)
+            if embedded:
+                return embedded
 
-        # 2. disk-cached .lrc file (sidecar for local, cache dir for Spotify)
-        #    An empty file is a sentinel meaning "instrumental / no lyrics" —
-        #    written below after all sources are exhausted.
-        if lrc_path and os.path.exists(lrc_path):
-            try:
-                with open(lrc_path, encoding="utf-8", errors="replace") as fh:
-                    content = fh.read()
-                if not content:
-                    log.info("lyrics: instrumental sentinel at %s — skipping lookups", lrc_path)
-                    return ""
-                log.info("lyrics: found cached .lrc at %s", lrc_path)
-                return content
-            except Exception as e:
-                log.warning("lyrics: lrc read error: %s", e)
+            # 2. disk-cached .lrc file (sidecar for local, cache dir for Spotify)
+            #    An empty file is a sentinel meaning "instrumental / no lyrics" —
+            #    written below after all sources are exhausted.
+            if lrc_path and os.path.exists(lrc_path):
+                try:
+                    with open(lrc_path, encoding="utf-8", errors="replace") as fh:
+                        content = fh.read()
+                    if not content:
+                        log.info("lyrics: instrumental sentinel at %s — skipping lookups", lrc_path)
+                        return ""
+                    log.info("lyrics: found cached .lrc at %s", lrc_path)
+                    return content
+                except Exception as e:
+                    log.warning("lyrics: lrc read error: %s", e)
+        else:
+            log.info("lyrics: force download — skipping embedded/cache, querying online sources")
 
         # 3. lrclib.net (synced LRC with timestamps — preferred for auto-scroll)
         artist = (song.get("artist") or song.get("albumartist") or "").strip()
@@ -2921,6 +2970,18 @@ class App:
         pygame.gfxdraw.aapolygon(self.screen, pts, col)
         pygame.gfxdraw.filled_circle(self.screen, cx, cy, hole, hole_col)
         pygame.gfxdraw.aacircle(self.screen, cx, cy, hole, hole_col)
+
+    def _draw_menu_icon(self, cx, cy, r, col=None):
+        """Hamburger icon (three lines) for the artwork/lyrics action menu."""
+        if col is None:
+            col = _BTN_ICON_COL
+        w     = int(r * 1.5)
+        thick = max(2, r // 4)
+        gap   = max(3, r * 2 // 3)
+        for dy in (-gap, 0, gap):
+            y0 = cy + dy - thick // 2
+            pygame.draw.rect(self.screen, col, (cx - w // 2, y0, w, thick),
+                             border_radius=thick // 2)
 
     def _draw_toggle(self, x, y, on):
         pw, ph = TOGGLE_W, TOGGLE_H
@@ -3648,6 +3709,271 @@ class App:
                 self._dirty = True
             threading.Thread(target=_do, daemon=True).start()
 
+    # ── album action menu (download/clear artwork & lyrics) ────────────────────
+
+    def _album_menu_rect(self):
+        row_h = TRACK_ROW_H
+        pw    = min(W - BTN_MARGIN * 2, max(280, W * 3 // 5))
+        ph    = len(_ALBUM_MENU_ITEMS) * row_h
+        px    = W - BTN_MARGIN - pw
+        py    = BTN_MARGIN + 2 * BTN_RADIUS + 8
+        return px, py, pw, ph
+
+    def _draw_album_menu(self):
+        px, py, pw, ph = self._album_menu_rect()
+        pygame.draw.rect(self.screen, COL_CELL_BG, (px, py, pw, ph), border_radius=8)
+        pygame.draw.rect(self.screen, COL_SEP,     (px, py, pw, ph), width=1, border_radius=8)
+
+        row_h = TRACK_ROW_H
+        for i, (key, label) in enumerate(_ALBUM_MENU_ITEMS):
+            ry  = py + i * row_h
+            col = (200, 80, 80) if key.startswith("clear") else COL_TRACK_NORMAL
+            sl  = _render_text(self._f_track, label, col, pw - BTN_MARGIN * 2)
+            self.screen.blit(sl, (px + BTN_MARGIN, ry + (row_h - sl.get_height()) // 2))
+            if i < len(_ALBUM_MENU_ITEMS) - 1:
+                pygame.draw.line(self.screen, COL_SEP, (px, ry + row_h - 1), (px + pw, ry + row_h - 1))
+
+    def _album_menu_item_at(self, pos) -> str | None:
+        px, py, pw, ph = self._album_menu_rect()
+        if not (px <= pos[0] < px + pw and py <= pos[1] < py + ph):
+            return None
+        row = (pos[1] - py) // TRACK_ROW_H
+        return _ALBUM_MENU_ITEMS[row][0] if 0 <= row < len(_ALBUM_MENU_ITEMS) else None
+
+    def _exec_album_menu_tap(self, action: str):
+        if action == "dl_art":
+            self._open_release_picker()
+        elif action == "clear_art":
+            self._clear_album_art_current()
+        elif action == "dl_lyrics":
+            self._download_lyrics_current()
+        elif action == "clear_lyrics":
+            self._clear_lyrics_current()
+
+    # ── release picker (manual "download album art" release choice) ────────────
+
+    def _release_picker_rect(self):
+        pw = min(W - BTN_MARGIN * 2, max(340, W * 9 // 10))
+        ph = min(H - BTN_MARGIN * 4, H * 4 // 5)
+        px = (W - pw) // 2
+        py = (H - ph) // 2
+        return px, py, pw, ph
+
+    def _draw_release_picker(self):
+        cands = self._art_release_picker
+        if cands is None:
+            return
+        ov = self._overlay_surf
+        ov.fill((0, 0, 0, 170))
+        self.screen.blit(ov, (0, 0))
+
+        px, py, pw, ph = self._release_picker_rect()
+        pygame.draw.rect(self.screen, COL_CELL_BG, (px, py, pw, ph), border_radius=10)
+        pygame.draw.rect(self.screen, COL_SEP,     (px, py, pw, ph), width=1, border_radius=10)
+
+        header_h  = TRACK_ROW_H
+        clip_y    = py + header_h
+        clip_h    = ph - header_h
+        max_rows  = max(1, clip_h // _REL_ROW_H)
+        shown     = cands[:max_rows]
+        overflow  = len(cands) - len(shown)
+
+        title = f"Choose a release ({len(cands)})" if not overflow else \
+                f"Choose a release ({len(shown)} of {len(cands)}, best shown)"
+        ts = _render_text(self._f_track_sm, title, COL_TEXT_ALBUM, pw - BTN_MARGIN * 2)
+        self.screen.blit(ts, (px + (pw - ts.get_width()) // 2,
+                              py + (header_h - ts.get_height()) // 2))
+        pygame.draw.line(self.screen, COL_SEP, (px, py + header_h - 1), (px + pw, py + header_h - 1))
+
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(px, clip_y, pw, clip_h)
+        for i, cand in enumerate(shown):
+            ry = clip_y + i * _REL_ROW_H
+            title_txt = cand.get("title") or "—"
+            disamb    = cand.get("disambiguation") or ""
+            if disamb:
+                title_txt = f"{title_txt} ({disamb})"
+            n       = len(cand.get("refs", []))
+            country = cand.get("country") or "??"
+            sub_txt = f"{country} · {n} picture{'s' if n != 1 else ''}"
+
+            t1 = _render_text(self._f_track, title_txt, COL_TRACK_NORMAL, pw - BTN_MARGIN * 2)
+            self.screen.blit(t1, (px + BTN_MARGIN, ry + 6))
+            t2 = _render_text(self._f_track_sm, sub_txt, COL_TEXT_ALBUM, pw - BTN_MARGIN * 2)
+            self.screen.blit(t2, (px + BTN_MARGIN, ry + _REL_ROW_H - t2.get_height() - 6))
+            if i < len(shown) - 1:
+                pygame.draw.line(self.screen, COL_SEP,
+                                 (px, ry + _REL_ROW_H - 1), (px + pw, ry + _REL_ROW_H - 1))
+        self.screen.set_clip(old_clip)
+
+    def _release_picker_hit(self, pos) -> bool:
+        px, py, pw, ph = self._release_picker_rect()
+        return px <= pos[0] < px + pw and py <= pos[1] < py + ph
+
+    def _release_picker_item_at(self, pos) -> dict | None:
+        cands = self._art_release_picker
+        if not cands:
+            return None
+        px, py, pw, ph = self._release_picker_rect()
+        header_h = TRACK_ROW_H
+        clip_y, clip_h = py + header_h, ph - header_h
+        if not (px <= pos[0] < px + pw and clip_y <= pos[1] < clip_y + clip_h):
+            return None
+        max_rows = max(1, clip_h // _REL_ROW_H)
+        row = (pos[1] - clip_y) // _REL_ROW_H
+        return cands[row] if 0 <= row < min(max_rows, len(cands)) else None
+
+    def _open_release_picker(self):
+        if self._cur_idx is None:
+            return
+        album = self._albums[self._cur_idx]
+        artist = album.get("artist", "")
+        name   = album.get("name", "")
+        tracks = album.get("tracks") or self._tracks
+        track_count = len(tracks) if tracks else 0
+        self._show_menu_toast("Loading releases…")
+
+        def _bg(artist=artist, name=name, track_count=track_count):
+            try:
+                cands = self._artwork.list_candidates(artist, name, track_count)
+            except Exception as e:
+                log.warning("release picker: list failed for %s - %s: %s", artist, name, e)
+                cands = []
+            if cands:
+                self._art_release_picker = cands
+            else:
+                self._show_menu_toast("No releases found")
+            self._dirty = True
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _pick_release_from_picker(self, candidate: dict):
+        self._art_release_picker = None
+        album_uri = self._art_album_uri
+        if not album_uri or album_uri in self._art_fetching:
+            return
+        self._art_fetching.add(album_uri)
+        self._art_paths = []
+        self._art_count = 1
+        self._art_pos = self._art_pos_t = 0.0
+        self._art_idx = 0
+        self._art_page_surf.clear()
+
+        def _on_image(path):
+            if album_uri != self._art_album_uri:
+                return
+            if path not in self._art_paths:
+                self._art_paths.append(path)
+                self._art_count = 1 + len(self._art_paths)
+                self._ensure_art_window()
+                self._dirty = True
+
+        def _bg():
+            try:
+                self._artwork.fetch_release(album_uri, candidate, on_image=_on_image)
+                self._show_menu_toast("Album art downloaded")
+            except Exception as e:
+                log.warning("release picker: fetch failed for %s: %s", album_uri, e)
+                self._show_menu_toast("Download failed")
+            finally:
+                self._art_fetching.discard(album_uri)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _clear_album_art_current(self):
+        album_uri = self._art_album_uri
+        if not album_uri:
+            return
+        self._artwork.clear(album_uri)
+        self._reset_art_carousel()
+        self._show_menu_toast("Album art cleared")
+
+    # ── lyrics download / clear (playback-screen menu) ──────────────────────────
+
+    def _download_lyrics_current(self):
+        uri = self._song.get("file", "")
+        if not uri:
+            return
+        song_snap   = dict(self._song)
+        status_snap = dict(self._status)
+        self._lyrics_loading = True
+        self._show_menu_toast("Downloading lyrics…")
+
+        def _bg(u=uri, ss=song_snap, st=status_snap):
+            try:
+                text   = self._load_lyrics_for_uri(u, song=ss, status=st, force=True)
+                parsed = self._parse_lyrics(text) if text else None
+            except Exception:
+                log.exception("download lyrics failed for %s", u)
+                parsed = None
+            self._lyrics_cache[u] = parsed
+            if self._lyrics_uri == u:
+                self._lyrics_parsed   = parsed
+                self._lyrics_scroll   = 0.0
+                self._lyrics_prev_idx = -1
+                self._lyrics_anim_t   = 0.0
+            self._lyrics_loading = False
+            self._show_menu_toast("Lyrics downloaded" if parsed else "No lyrics found")
+            self._dirty = True
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _clear_lyrics_current(self):
+        uri = self._song.get("file", "")
+        if not uri:
+            return
+        path     = self._resolve_music_path(uri)
+        lrc_path = self._lrc_disk_path(uri, path)
+        if lrc_path and os.path.exists(lrc_path):
+            try:
+                os.remove(lrc_path)
+            except Exception as e:
+                log.warning("clear lyrics: %s", e)
+        self._lyrics_cache.pop(uri, None)
+
+        # The per-album "fully cached" marker is no longer accurate once a
+        # track's lyrics are cleared — drop it and persist the index.
+        album_uri = self._art_album_uri
+        if album_uri and album_uri in self._lyrics_album_index:
+            self._lyrics_album_index.discard(album_uri)
+            self._save_lyrics_index()
+
+        embedded = self._embedded_lyrics(path) if path else None
+        parsed   = self._parse_lyrics(embedded) if embedded else None
+        if self._lyrics_uri == uri:
+            self._lyrics_parsed   = parsed
+            self._lyrics_scroll   = 0.0
+            self._lyrics_prev_idx = -1
+            self._lyrics_anim_t   = 0.0
+        self._show_menu_toast("Lyrics cleared")
+        self._dirty = True
+
+    # ── menu toast (small transient confirmation) ───────────────────────────────
+
+    def _show_menu_toast(self, text: str):
+        self._menu_toast    = text
+        self._menu_toast_ms = pygame.time.get_ticks()
+        self._dirty = True
+
+    def _draw_menu_toast(self):
+        if not self._menu_toast:
+            return
+        elapsed    = pygame.time.get_ticks() - self._menu_toast_ms
+        hold, fade = 1400, 400
+        if elapsed >= hold + fade:
+            self._menu_toast = None
+            return
+        alpha = 255 if elapsed < hold else max(0, int(255 * (1 - (elapsed - hold) / fade)))
+
+        text_s = _render_text(self._f_track, self._menu_toast, (235, 235, 235))
+        pad_x, pad_y = 22, 12
+        pw, ph = text_s.get_width() + pad_x * 2, text_s.get_height() + pad_y * 2
+        surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (20, 20, 26, int(210 * alpha / 255)), (0, 0, pw, ph),
+                         border_radius=ph // 2)
+        if alpha < 255:
+            text_s = text_s.copy()
+            text_s.set_alpha(alpha)
+        surf.blit(text_s, (pad_x, pad_y))
+        self.screen.blit(surf, ((W - pw) // 2, H - PROGRESS_H - ph - 28))
+
     # ── hit testing ───────────────────────────────────────────────────────────
 
     def _cell_at(self, pos) -> int | None:
@@ -3688,6 +4014,15 @@ class App:
     def _gear_btn_hit(self, pos) -> bool:
         gx, gy = W - BTN_RADIUS - BTN_MARGIN - 2 * BTN_RADIUS - BTN_GAP, BTN_MARGIN + BTN_RADIUS
         dx, dy = pos[0] - gx, pos[1] - gy
+        return dx * dx + dy * dy <= (BTN_RADIUS + 10) ** 2
+
+    def _menu_btn_pos(self):
+        gx = W - BTN_RADIUS - BTN_MARGIN - 2 * BTN_RADIUS - BTN_GAP   # gear position
+        return gx - 2 * BTN_RADIUS - BTN_GAP, BTN_MARGIN + BTN_RADIUS
+
+    def _menu_btn_hit(self, pos) -> bool:
+        mx, my = self._menu_btn_pos()
+        dx, dy = pos[0] - mx, pos[1] - my
         return dx * dx + dy * dy <= (BTN_RADIUS + 10) ** 2
 
     def _build_audio_items(self) -> list[dict]:
@@ -3777,6 +4112,7 @@ class App:
         if self._stop_btn_hit(pos):    return "stop"
         if self._speaker_btn_hit(pos): return "speaker"
         if self._gear_btn_hit(pos):    return "gear"
+        if self._menu_btn_hit(pos):    return "menu"
         return self._ctrl_zone(pos)    # "play" | "prev" | "next" | None
 
     def _ctrl_zone(self, pos) -> str | None:
@@ -4046,6 +4382,26 @@ class App:
             if int(self._ctrl_a) > 10:
                 # controls are showing — handle button taps
 
+                # release-picker row selection (topmost overlay when open)
+                if self._art_release_picker is not None:
+                    if self._release_picker_hit(pos):
+                        cand = self._release_picker_item_at(pos)
+                        if cand is not None:
+                            self._pick_release_from_picker(cand)
+                    else:
+                        self._art_release_picker = None
+                    self._dirty = True
+                    return
+
+                # album action-menu item selection
+                if self._album_menu_open:
+                    action = self._album_menu_item_at(pos)
+                    if action:
+                        self._exec_album_menu_tap(action)
+                    self._album_menu_open = False
+                    self._dirty = True
+                    return
+
                 # audio popup sink selection (check before other buttons)
                 sink = self._audio_popup_sink_at(pos)
                 if sink is not None:
@@ -4092,6 +4448,10 @@ class App:
                     return
                 if self._gear_btn_hit(pos):
                     self._open_settings()
+                    return
+                if self._menu_btn_hit(pos):
+                    self._album_menu_open = not self._album_menu_open
+                    self._dirty = True
                     return
                 zone = self._ctrl_zone(pos)
                 if zone == "prev":
@@ -4141,7 +4501,9 @@ class App:
         self._ctrl_shown_ms = pygame.time.get_ticks()
     def _hide_controls(self):
         self._ctrl_a = 0.0; self._ctrl_a_t = 0.0
-        self._audio_popup_open = False
+        self._audio_popup_open  = False
+        self._album_menu_open   = False
+        self._art_release_picker = None
 
     def _reset_elapsed(self):
         self._elapsed_base   = 0.0
