@@ -65,16 +65,8 @@ _PHASH_THRESH = 6
 _STORE_MAX_PX = 1000
 # Cap releases inspected per album so a huge release group can't stall forever.
 _MAX_RELEASES = 12
-# When several releases have art, download this many of the most promising and
-# keep the single best — never aggregate art across releases (that mixed
-# split/non-split scans of the same page and produced duplicates).
-_EVAL_RELEASES = 3
-# Resolution (longest edge, px) is the primary quality signal — a page need not
-# exceed the 720px screen, but should clear these bars.  "Good enough" res
-# beats "more pictures".
-_RES_GOOD = 480
-_RES_OK = 300
-# Country preference (tie-break only), in the order the user asked for.
+# Country preference (tie-break when releases have the same art count), in the
+# order the user asked for.
 _COUNTRY_PRIORITY = {"NO": 0, "XE": 1, "GB": 2, "UK": 2, "US": 3, "CA": 4}
 
 
@@ -473,47 +465,16 @@ class ArtworkFetcher:
         """Choose the single best release.  Never aggregate across releases —
         that mixed split/non-split scans of the same page.
 
-        Scored on: resolution tier first (a page need only clear ~480/300px,
-        not the 720 screen), then number of pages, then country preference.
-        Resolution + strip page-count come from a one-image header probe per
-        release (the -1200 thumbnail's real dimensions), so we never download
-        full art just to compare.  If probing fails, fall back to entry count.
+        Selection is by number of art entries (most wins); the country order
+        NO, XE, GB/UK, US, CA breaks ties.
         """
         if not candidates:
             return None
-        # Preliminary rank: preferred country, then most entries.  With a
-        # single art-bearing release there's nothing to compare — use it.
-        candidates.sort(key=lambda c: (_country_priority(c["country"]), -len(c["refs"])))
-        if len(candidates) == 1:
-            return candidates[0]
-
-        best = None   # (score_tuple, candidate)
-        for cand in candidates[:_EVAL_RELEASES]:   # bounded — never probe them all
-            refs = cand["refs"]
-            country = cand["country"]
-            # Probe one representative image (prefer a booklet page).
-            sample = next((r for r in refs if r.type == "Booklet"), refs[0])
-            dims = self._probe_dims(sample.url)
-            if dims:
-                w, h = dims
-                ratio = max(w, h) / max(1, min(w, h))
-                if ratio >= _SPREAD_RATIO:          # whole-pamphlet strip
-                    n = max(2, round(ratio))
-                    page_long = max(w, h) / n
-                    est_pages = len(refs) * n
-                else:
-                    page_long = max(w, h)
-                    est_pages = len(refs)
-                tier = 2 if page_long >= _RES_GOOD else 1 if page_long >= _RES_OK else 0
-            else:
-                tier, est_pages = 1, len(refs)       # probe slow/failed → count only
-            score = (tier, est_pages, -_country_priority(country))
-            if best is None or score > best[0]:
-                best = (score, cand)
-        score, cand = best
-        log.info("artwork: %s - %s → release %s (%s): res-tier %d, ~%d pages",
+        candidates.sort(key=lambda c: (-len(c["refs"]), _country_priority(c["country"])))
+        cand = candidates[0]
+        log.info("artwork: %s - %s → release %s (%s): %d entries",
                  artist, album, cand["release_id"][:8], cand["country"] or "?",
-                 score[0], score[1])
+                 len(cand["refs"]))
         return cand
 
     def _release_pages(self, refs: list[ArtRef]) -> list[tuple[str, str, Image.Image]]:
@@ -574,19 +535,6 @@ class ArtworkFetcher:
             kept.append(c)
         kept.sort(key=lambda c: c["key"])
         return [(c["ref"].type, c["ref"].source, c["img"]) for c in kept]
-
-    def _probe_dims(self, url: str) -> tuple[int, int] | None:
-        """Read an image's real pixel dimensions from a 32KB ranged GET of its
-        header — enough to know aspect ratio and resolution without the full
-        download.  Returns (w, h) or None."""
-        try:
-            r = self._session.get(url, timeout=8,
-                                  headers={"Range": "bytes=0-32767"})
-            if r.status_code in (200, 206) and r.content:
-                return Image.open(io.BytesIO(r.content)).size
-        except Exception as e:
-            log.debug("artwork: dim probe failed for %s: %s", url[-40:], e)
-        return None
 
     @staticmethod
     def _write_manifest(album_dir: str, manifest: list[dict]):
