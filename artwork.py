@@ -57,6 +57,10 @@ _DEFAULT_TYPES = ("Back", "Booklet")
 
 # A scan wider than this ratio is treated as a two-page spread and split.
 _SPREAD_RATIO = 1.5
+# Max dHash Hamming distance for two images to count as the same page.  The
+# same page rescanned at a different resolution/compression lands at 0-4;
+# genuinely different pages sit well above this.
+_PHASH_THRESH = 6
 # Longest edge stored on disk (screen is 720px; 1000 leaves headroom to crop).
 _STORE_MAX_PX = 1000
 # Cap releases inspected per album so a huge release group can't stall forever.
@@ -484,17 +488,36 @@ class ArtworkFetcher:
                          "individual scan(s)", artist, album,
                          len(booklet_strip), len(booklet_indiv))
 
-        # Assemble in display order: Back etc. by type, then booklet in order.
-        ordered: list[tuple[tuple, ArtRef, Image.Image]] = []
+        # Assemble candidate pages with a display-order key.
+        candidates: list[dict] = []
         for ref, img in others:
-            ordered.append(((_TYPE_ORDER.get(ref.type, 8), ref.order, 0), ref, img))
+            candidates.append({"key": (_TYPE_ORDER.get(ref.type, 8), ref.order, 0),
+                               "ref": ref, "img": img})
         for i, (ref, img) in enumerate(chosen):
-            ordered.append(((_TYPE_ORDER.get("Booklet", 2), ref.order, i), ref, img))
-        ordered.sort(key=lambda t: t[0])
+            candidates.append({"key": (_TYPE_ORDER.get("Booklet", 2), ref.order, i),
+                               "ref": ref, "img": img})
+
+        # Perceptual dedup: the same page is often uploaded as several separate
+        # scans (different bytes, so the exact hash misses them).  Keep the
+        # highest-resolution representative of each near-duplicate cluster.
+        for c in candidates:
+            c["phash"] = self._dhash(c["img"])
+            c["res"] = c["img"].size[0] * c["img"].size[1]
+        kept: list[dict] = []
+        for c in sorted(candidates, key=lambda c: -c["res"]):
+            if any(self._hamming(c["phash"], k["phash"]) <= _PHASH_THRESH for k in kept):
+                continue
+            kept.append(c)
+        dropped = len(candidates) - len(kept)
+        if dropped:
+            log.info("artwork: %s - %s: dropped %d duplicate page(s)",
+                     artist, album, dropped)
+        ordered = sorted(kept, key=lambda c: c["key"])
 
         manifest: list[dict] = []
         seq = 0
-        for _, ref, img in ordered:
+        for c in ordered:
+            ref, img = c["ref"], c["img"]
             img = self._downscale(img)
             seq += 1
             fname = f"{seq:02d}_{ref.type.lower()}.jpg"
@@ -547,6 +570,23 @@ class ArtworkFetcher:
                 log.debug("artwork: download %s try %d: %s", url[-40:], attempt, e)
             time.sleep(1.0 + attempt)
         return None
+
+    @staticmethod
+    def _dhash(img: Image.Image, size: int = 8) -> int:
+        """Perceptual difference hash — stable across resolution/compression,
+        so the same page from two different scans hashes near-identically."""
+        small = img.convert("L").resize((size + 1, size), Image.LANCZOS)
+        px = small.tobytes()   # one byte per pixel for mode "L"
+        bits = 0
+        for r in range(size):
+            row = r * (size + 1)
+            for c in range(size):
+                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
+        return bits
+
+    @staticmethod
+    def _hamming(a: int, b: int) -> int:
+        return bin(a ^ b).count("1")
 
     @staticmethod
     def _split_spread(img: Image.Image) -> list[Image.Image]:
